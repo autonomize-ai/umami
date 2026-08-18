@@ -4,6 +4,7 @@ import { execSync } from 'node:child_process';
 import { PrismaPg } from '@prisma/adapter-pg';
 import chalk from 'chalk';
 import { PrismaClient } from '../generated/prisma/client.js';
+import { isAzureManagedIdentityEnabled, withAzureToken } from './azure-db.js';
 
 const MIN_VERSION = '9.4.0';
 const MIN_VERSION_NUM = 90400;
@@ -13,7 +14,13 @@ if (process.env.SKIP_DB_CHECK) {
   process.exit(0);
 }
 
-const url = new URL(process.env.DATABASE_URL);
+// This check is one-shot, so a single token covers it — unlike the long-lived
+// runtime pool, which refreshes per connection.
+const url = new URL(
+  isAzureManagedIdentityEnabled()
+    ? await withAzureToken(process.env.DATABASE_URL)
+    : process.env.DATABASE_URL,
+);
 
 const adapter = new PrismaPg(
   { connectionString: url.toString() },
@@ -72,9 +79,16 @@ async function checkDatabaseVersion() {
 async function applyMigration() {
   if (!process.env.SKIP_DB_MIGRATION) {
     const directUrl = process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
+
+    // The Prisma CLI reads DATABASE_URL itself and cannot use our pool, so the
+    // token is embedded in the URL it is handed. Migrations are short-lived.
+    const migrationUrl = isAzureManagedIdentityEnabled()
+      ? await withAzureToken(directUrl)
+      : directUrl;
+
     console.log(
       execSync('prisma migrate deploy', {
-        env: { ...process.env, DATABASE_URL: directUrl },
+        env: { ...process.env, DATABASE_URL: migrationUrl },
       }).toString(),
     );
 

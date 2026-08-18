@@ -2,6 +2,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { readReplicas } from '@prisma/extension-read-replicas';
 import debug from 'debug';
 import { PrismaClient } from '@/generated/prisma/client';
+import { createAzurePool, isAzureManagedIdentityEnabled } from './azure-db';
 import { DATA_TYPE, DEFAULT_PAGE_SIZE, FILTER_COLUMNS, OPERATORS, SESSION_COLUMNS } from './constants';
 import { filtersObjectToArray } from './params';
 import type { Operator, PropertyFilter, QueryFilters, QueryOptions } from './types';
@@ -870,7 +871,11 @@ function getClient() {
 
   const schema = getSchema();
 
-  const baseAdapter = new PrismaPg({ connectionString: url }, { schema });
+  // With Entra auth the credential is a short-lived token, so the adapter is
+  // given a pool that mints one per connection instead of a static URL.
+  const baseAdapter = isAzureManagedIdentityEnabled()
+    ? new PrismaPg(createAzurePool(url), { schema })
+    : new PrismaPg({ connectionString: url }, { schema });
 
   const baseClient = new PrismaClient({
     adapter: baseAdapter,
@@ -888,7 +893,9 @@ function getClient() {
     return baseClient;
   }
 
-  const replicaAdapter = new PrismaPg({ connectionString: replicaUrl }, { schema });
+  const replicaAdapter = isAzureManagedIdentityEnabled()
+    ? new PrismaPg(createAzurePool(replicaUrl), { schema })
+    : new PrismaPg({ connectionString: replicaUrl }, { schema });
 
   const replicaClient = new PrismaClient({
     adapter: replicaAdapter,

@@ -2,6 +2,9 @@ ARG NODE_IMAGE_VERSION="22-alpine"
 ARG PNPM_VERSION="11.21.0"
 # Keep in sync with the prisma/@prisma/* versions in package.json
 ARG PRISMA_VERSION="7.9.1"
+# @azure/identity is installed into the runner stage for the startup scripts
+# (scripts/azure-db.js), which run outside the Next.js bundle.
+ARG AZURE_IDENTITY_VERSION="4.13.1"
 
 # Install dependencies only when needed
 FROM node:${NODE_IMAGE_VERSION} AS deps
@@ -39,6 +42,7 @@ WORKDIR /app
 ARG NODE_OPTIONS
 ARG PNPM_VERSION
 ARG PRISMA_VERSION
+ARG AZURE_IDENTITY_VERSION
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -60,6 +64,7 @@ RUN printf "allowBuilds:\n  '@prisma/engines': true\n  prisma: false\nverifyDeps
 
 # Script dependencies
 RUN pnpm add npm-run-all dotenv chalk semver \
+    @azure/identity@${AZURE_IDENTITY_VERSION} \
     prisma@${PRISMA_VERSION} \
     @prisma/client@${PRISMA_VERSION} \
     @prisma/adapter-pg@${PRISMA_VERSION}
