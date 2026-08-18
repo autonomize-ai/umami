@@ -56,10 +56,11 @@ variables:
 trigger:
   branches:
     include:
-      # This branch only. `master` tracks upstream past v3.3.0 and carries NO Entra
-      # patch, so building it would publish an image tagged `-mi` that cannot do
-      # managed-identity auth at all.
-      - feat/azure-managed-identity
+      # `develop` only. It is cut from tag v3.3.0 and is the default branch and
+      # permanent home of the Entra patch. `master` still tracks upstream past
+      # v3.3.0 and carries NO Entra patch, so building it would publish an image
+      # tagged `-mi` that cannot do managed-identity auth at all.
+      - develop
   paths:
     include:
       - src/**
@@ -93,7 +94,7 @@ stages:
 
   # The image is built on every trigger; the chart bump is gated by
   # ENABLE_CHART_BUMP above so the first runs push an image and touch nothing in
-  # genesis-v3-charts. This branch is cut from tag v3.3.0 and is the permanent
+  # genesis-v3-charts. `develop` is cut from tag v3.3.0 and is the permanent
   # home of the Entra patch — it is never merged into master, which tracks
   # upstream past 3.3.0 — so it is the release branch for this image.
   - stage: ImageTagUpdate
@@ -102,6 +103,6 @@ stages:
     condition: >-
       and(succeeded(),
           eq(variables['ENABLE_CHART_BUMP'], 'true'),
-          eq(variables['Build.SourceBranch'], 'refs/heads/feat/azure-managed-identity'))
+          eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
     jobs:
       - template: templates/release-template.yml

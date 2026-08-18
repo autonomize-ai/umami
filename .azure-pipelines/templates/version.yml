@@ -15,7 +15,7 @@ jobs:
           branchname="${cleaned_string//\//-}"
           commit_hash="${BUILD_SOURCEVERSION:0:8}"
 
-          if [[ "$branchname" == "feat-azure-managed-identity" ]]
+          if [[ "$branchname" == "develop" ]]
           then
             echo "##vso[build.updatebuildnumber]$(UPSTREAM_VERSION)-mi.$(globalPatch)"
           else
