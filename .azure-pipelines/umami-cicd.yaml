@@ -19,9 +19,13 @@ resources:
       type: github
       endpoint: autonomize-ai
       name: autonomize-ai/genesis-v3-charts
-      # The umami chart currently lives only on this branch. Move to `develop`
-      # once it has landed there.
-      ref: feat/umami-analytics-default-off
+      # `develop` is where service CI auto-bumps land, per that repo's
+      # RELEASE_CADENCE.md ("genesis-v3-charts/develop is populated by service
+      # CI's [skip ci] auto-bumps"). Deliberately not the chart's feature
+      # branch: that gets deleted when it merges, which would leave this ref
+      # dangling. The chart is not on develop yet, which is fine — ENABLE_CHART_BUMP
+      # is false, so nothing checks it out until the chart lands there.
+      ref: develop
 
 variables:
   # Upstream release this fork is based on. The build number is derived from it
