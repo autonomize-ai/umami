@@ -1,0 +1,107 @@
+# Umami (Microsoft Entra fork) — image CI/CD
+#
+# Builds the patched Umami image and publishes it to the platform ACR as
+# `genesis-umami`, following the platform's third-party convention documented in
+# genesis-v3-charts/docs/SECURITY_OPENCOST.md §1 (container image = chart name),
+# the same shape as keycloak-custom -> genesis-idp and temporal -> genesis-de.
+#
+# The Helm chart is deliberately NOT in this repo: it lives in genesis-v3-charts
+# at genesis/charts/umami/ as a file:// subchart, alongside the other optional
+# third-party bundles (opencost, keda, external-secrets, observability). This
+# pipeline builds the image and bumps that chart's image.tag — nothing else.
+#
+# This branch is cut from upstream tag v3.3.0; UPSTREAM_VERSION below must be
+# kept in step with whatever tag the branch is rebased onto.
+
+resources:
+  repositories:
+    - repository: genesis-v3-charts
+      type: github
+      endpoint: autonomize-ai
+      name: autonomize-ai/genesis-v3-charts
+      # The umami chart currently lives only on this branch. Move to `develop`
+      # once it has landed there.
+      ref: feat/umami-analytics-default-off
+
+variables:
+  # Upstream release this fork is based on. The build number is derived from it
+  # so a platform tag is always traceable to an upstream version.
+  UPSTREAM_VERSION: '3.3.0'
+
+  # Auto-bump of the umami chart's image.tag in genesis-v3-charts.
+  #
+  # Keep 'false' until that chart sets image.repository: genesis-umami. It still
+  # defaults to the stock ghcr.io image, which cannot do Entra auth at all, so
+  # writing an MI tag onto it would pin an image that does not exist there.
+  # Flip to 'true' in the same change that lands the chart PR.
+  #
+  # This is a separate switch from the branch check on purpose: 'not enabled
+  # yet' is a deliberate config state that should skip quietly, whereas 'enabled
+  # but the chart looks wrong' is an error that must fail loudly (see the
+  # repository/digest guards in templates/release-template.yml).
+  ENABLE_CHART_BUMP: 'false'
+  patch: $[counter(variables['Build.SourceBranchName'], 0)]
+  globalPatch: $[counter('umamiGlobalPatch', 0)]
+
+  # Container Registry Configuration
+  ACR_RESOURCE_GROUP: sprintRG
+  AZURE_CONTAINER_REGISTRY: sprintregistry
+  ACR_ENDPOINT: 'sprintregistry.azurecr.io'
+
+  # Image = chart name, per the platform third-party convention.
+  IMAGE_NAME: 'genesis-umami'
+  CONTAINER_NAME: 'genesis-umami'
+  DOCKERFILE_PATH: 'Dockerfile'
+
+trigger:
+  branches:
+    include:
+      # This branch only. `master` tracks upstream past v3.3.0 and carries NO Entra
+      # patch, so building it would publish an image tagged `-mi` that cannot do
+      # managed-identity auth at all.
+      - feat/azure-managed-identity
+  paths:
+    include:
+      - src/**
+      - scripts/**
+      - prisma/**
+      - package.json
+      - pnpm-lock.yaml
+      - Dockerfile
+      - .azure-pipelines/**
+
+pr: none
+
+stages:
+  - stage: Version
+    displayName: 'Versioning'
+    condition: ne(variables['Build.Reason'], 'PullRequest')
+    jobs:
+      - template: templates/version.yml
+
+  - stage: Build
+    displayName: 'Build Umami (Entra) Image'
+    dependsOn: Version
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - template: templates/umami-build-template.yml
+        parameters:
+          jobCondition: succeeded()
+          CONTAINER_NAME: $(IMAGE_NAME)
+          DOCKERFILE_PATH: $(DOCKERFILE_PATH)
+          AZURE_CONTAINER_REGISTRY: $(AZURE_CONTAINER_REGISTRY)
+
+  # The image is built on every trigger; the chart bump is gated by
+  # ENABLE_CHART_BUMP above so the first runs push an image and touch nothing in
+  # genesis-v3-charts. This branch is cut from tag v3.3.0 and is the permanent
+  # home of the Entra patch — it is never merged into master, which tracks
+  # upstream past 3.3.0 — so it is the release branch for this image.
+  - stage: ImageTagUpdate
+    displayName: 'Update Image Tag in genesis-v3-charts'
+    dependsOn: Build
+    condition: >-
+      and(succeeded(),
+          eq(variables['ENABLE_CHART_BUMP'], 'true'),
+          eq(variables['Build.SourceBranch'], 'refs/heads/feat/azure-managed-identity'))
+    jobs:
+      - template: templates/release-template.yml

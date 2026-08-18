@@ -1,0 +1,102 @@
+parameters:
+  - name: CONTAINER_NAME
+    type: string
+  - name: DOCKERFILE_PATH
+    type: string
+  - name: AZURE_CONTAINER_REGISTRY
+    type: string
+  - name: BUILD_ARGS
+    type: string
+    default: ''
+  - name: jobCondition
+    type: string
+    default: succeeded()
+  - name: PLATFORMS
+    type: string
+    # The chart advertises a multi-arch image; arm64 is also what local k3d dev
+    # on Apple Silicon needs, so both are built rather than amd64 alone.
+    default: linux/amd64,linux/arm64
+
+jobs:
+  - job: BuildAndPushUmami
+    displayName: 'Build and Push Umami (Entra)'
+    condition: ${{ parameters.jobCondition }}
+    # Self-hosted pool: the multi-arch Next.js build is heavy and needs a real
+    # Docker daemon with buildx.
+    pool:
+      name: ad-vmss-p1
+    steps:
+      - checkout: self
+        submodules: true
+        persistCredentials: true
+
+      - script: |
+          sudo apt-get update
+          sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+          sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+          sudo apt-get update
+          sudo apt-get install -y docker-ce containerd.io
+          sudo systemctl start docker
+          sudo chmod 666 /var/run/docker.sock || true
+          docker version
+        displayName: Install Docker Engine
+
+      - task: Docker@2
+        displayName: Login to ACR
+        inputs:
+          command: login
+          containerRegistry: "${{ parameters.AZURE_CONTAINER_REGISTRY }}"
+        condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
+
+      - script: |
+          set -e
+          docker buildx create --name multiarch-builder --driver docker-container --use
+          docker buildx inspect --bootstrap
+          IMAGE_NAME="${{ parameters.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ parameters.CONTAINER_NAME }}"
+          BUILD_ARGS='${{ parameters.BUILD_ARGS }}'
+
+          docker buildx build \
+            --platform "${{ parameters.PLATFORMS }}" \
+            --file "${{ parameters.DOCKERFILE_PATH }}" \
+            $BUILD_ARGS \
+            --tag "$IMAGE_NAME:$(Build.BuildNumber)" \
+            --tag "$IMAGE_NAME:latest" \
+            --push \
+            .
+        displayName: Build and push multi-arch image
+        condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
+
+      - script: |
+          IMAGE_NAME="${{ parameters.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ parameters.CONTAINER_NAME }}"
+          echo "=== Verifying Multi-Architecture Manifest ==="
+          docker buildx imagetools inspect "$IMAGE_NAME:$(Build.BuildNumber)"
+        displayName: Verify multi-arch manifest
+        condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
+
+      # Assert the Entra dependency actually landed in the runner stage. The
+      # startup scripts (scripts/azure-db.js) import @azure/identity outside the
+      # Next.js bundle, and the runner stage installs its own minimal dep set —
+      # so a dropped `pnpm add` entry would only show up as MODULE_NOT_FOUND at
+      # container start, long after CI reported success.
+      - script: |
+          set -e
+          IMAGE_NAME="${{ parameters.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ parameters.CONTAINER_NAME }}"
+          docker pull "$IMAGE_NAME:$(Build.BuildNumber)"
+          docker run --rm --entrypoint sh "$IMAGE_NAME:$(Build.BuildNumber)" \
+            -c 'node -e "require(\"/app/node_modules/@azure/identity\"); console.log(\"@azure/identity present\")"'
+        displayName: Assert @azure/identity is present in the image
+        condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
+
+      - script: |
+          git tag umami-$(Build.BuildNumber)
+          git push origin umami-$(Build.BuildNumber)
+        displayName: 'Git Tag'
+        condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
+
+      - script: |
+          echo "Umami (Entra) image built and pushed successfully"
+          echo "Image: ${{ parameters.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ parameters.CONTAINER_NAME }}:$(Build.BuildNumber)"
+          echo "Upstream base: v$(UPSTREAM_VERSION)"
+          echo "Adds: Microsoft Entra (Azure MI) PostgreSQL auth via AZURE_USE_MANAGED_IDENTITY=true"
+        displayName: 'Umami Build Summary'

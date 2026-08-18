@@ -1,0 +1,60 @@
+# Bump the umami chart's image.tag in genesis-v3-charts.
+#
+# The tag goes in the SUBCHART's values.yaml, not env-values/. genesis-v3-charts
+# CLAUDE.md: "Image tags belong in each service's chart values.yaml — NEVER in
+# env-values/ files" (env-values carries per-environment overrides only).
+#
+# Ordering matters: the image tag must already exist in sprintregistry before any
+# chart change references it. That is guaranteed here because this stage runs only
+# after the Build stage has pushed and verified the manifest.
+jobs:
+  - job: ImageTagUpdate
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+      - checkout: genesis-v3-charts
+        fetchDepth: 0
+        persistCredentials: true
+
+      - script: |
+          git config --global user.email "release@autonomize.ai"
+          git config --global user.name "release"
+          git checkout feat/umami-analytics-default-off
+        displayName: 'Setup GIT'
+
+      - script: |
+          set -e
+          wget -q https://github.com/mikefarah/yq/releases/download/v4.42.1/yq_linux_amd64
+          chmod +x yq_linux_amd64
+          sudo mv yq_linux_amd64 /usr/local/bin/yq
+
+          valuesFile="genesis/charts/umami/values.yaml"
+          echo "Updating $valuesFile image.tag -> $(Build.BuildNumber)"
+          buildnumber="$(Build.BuildNumber)" yq -i e '.image.tag = env(buildnumber)' "$valuesFile"
+
+          # Guard: an MI tag on the stock upstream repository would deploy an
+          # image that cannot do Entra auth at all. Refuse rather than ship it.
+          repo=$(yq e '.image.repository' "$valuesFile")
+          if [ "$repo" != "genesis-umami" ]; then
+            echo "ERROR: image.repository is '$repo', expected 'genesis-umami'."
+            echo "Flip the chart to the platform image before enabling this stage."
+            exit 1
+          fi
+
+          # A digest pin would override the tag we just set.
+          digest=$(yq e '.image.digest' "$valuesFile")
+          if [ -n "$digest" ] && [ "$digest" != "null" ] && [ "$digest" != '""' ]; then
+            echo "ERROR: image.digest is set ('$digest'); it takes precedence over image.tag."
+            exit 1
+          fi
+
+          git --no-pager diff -- "$valuesFile"
+        displayName: 'Update image tag in the umami subchart'
+
+      - script: |
+          set -e
+          valuesFile="genesis/charts/umami/values.yaml"
+          git add "$valuesFile"
+          git commit -m "[skip ci] $(CONTAINER_NAME) image tag updated: $(Build.BuildNumber)"
+          git push --set-upstream origin feat/umami-analytics-default-off
+        displayName: 'Push image tag to genesis-v3-charts'
