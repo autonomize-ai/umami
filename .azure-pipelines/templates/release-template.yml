@@ -19,7 +19,7 @@ jobs:
       - script: |
           git config --global user.email "release@autonomize.ai"
           git config --global user.name "release"
-          git checkout feat/umami-analytics-default-off
+          git checkout develop
         displayName: 'Setup GIT'
 
       - script: |
@@ -29,6 +29,16 @@ jobs:
           sudo mv yq_linux_amd64 /usr/local/bin/yq
 
           valuesFile="genesis/charts/umami/values.yaml"
+
+          # The chart may not have landed on develop yet. Say so plainly instead
+          # of failing inside yq with "no such file or directory".
+          if [ ! -f "$valuesFile" ]; then
+            echo "ERROR: $valuesFile does not exist on this branch."
+            echo "The umami chart has not landed on genesis-v3-charts develop yet."
+            echo "Keep ENABLE_CHART_BUMP=false until it has."
+            exit 1
+          fi
+
           echo "Updating $valuesFile image.tag -> $(Build.BuildNumber)"
           buildnumber="$(Build.BuildNumber)" yq -i e '.image.tag = env(buildnumber)' "$valuesFile"
 
@@ -56,5 +66,5 @@ jobs:
           valuesFile="genesis/charts/umami/values.yaml"
           git add "$valuesFile"
           git commit -m "[skip ci] $(CONTAINER_NAME) image tag updated: $(Build.BuildNumber)"
-          git push --set-upstream origin feat/umami-analytics-default-off
+          git push --set-upstream origin develop
         displayName: 'Push image tag to genesis-v3-charts'

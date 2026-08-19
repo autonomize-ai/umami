@@ -13,9 +13,23 @@ parameters:
     default: succeeded()
   - name: PLATFORMS
     type: string
-    # The chart advertises a multi-arch image; arm64 is also what local k3d dev
-    # on Apple Silicon needs, so both are built rather than amd64 alone.
-    default: linux/amd64,linux/arm64
+    # amd64 only, deliberately.
+    #
+    # On an amd64 agent every RUN in a linux/arm64 build executes under QEMU
+    # emulation. For a Node/Next.js image that is punitive: `pnpm install` of
+    # 1221 packages takes ~4 min natively and the Next build ~85s, and both run
+    # 5-15x slower emulated. Build 90118 sat on this step for 24 minutes with no
+    # output and pushed nothing.
+    #
+    # This default was inherited from genesis-openfga, which is Go and
+    # cross-compiles natively at near-zero cost. That does not transfer to a
+    # Node build.
+    #
+    # Nothing needs arm64: AKS runs amd64. It is only wanted for local k3d on
+    # Apple Silicon, where the image is built natively on the machine anyway. To
+    # publish arm64, add it back on a NATIVE arm64 agent, or as a separate
+    # optional job so it cannot block the amd64 image.
+    default: linux/amd64
 
 jobs:
   - job: BuildAndPushUmami
@@ -64,14 +78,14 @@ jobs:
             --tag "$IMAGE_NAME:latest" \
             --push \
             .
-        displayName: Build and push multi-arch image
+        displayName: Build and push image
         condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
 
       - script: |
           IMAGE_NAME="${{ parameters.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ parameters.CONTAINER_NAME }}"
-          echo "=== Verifying Multi-Architecture Manifest ==="
+          echo "=== Verifying Image Manifest ==="
           docker buildx imagetools inspect "$IMAGE_NAME:$(Build.BuildNumber)"
-        displayName: Verify multi-arch manifest
+        displayName: Verify image manifest
         condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
 
       # Assert the Entra dependency actually landed in the runner stage. The
