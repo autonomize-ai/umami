@@ -54,6 +54,11 @@ variables:
 
   # Image = chart name, per the platform third-party convention.
   IMAGE_NAME: 'genesis-umami'
+  # Chart registry. Deliberately a DIFFERENT registry from the image:
+  # genesis-v3-charts/CLAUDE.md — platformhelm is Helm charts ONLY,
+  # sprintregistry is container images ONLY.
+  HELM_ACR_NAME: platformhelm
+  HELM_SERVICE_CONNECTION_NAME: platform-dev-1007
   CONTAINER_NAME: 'genesis-umami'
   DOCKERFILE_PATH: 'Dockerfile'
 
@@ -73,6 +78,7 @@ trigger:
       - package.json
       - pnpm-lock.yaml
       - Dockerfile
+      - helmcharts/**
       - .azure-pipelines/**
 
 pr: none
@@ -96,14 +102,32 @@ stages:
           DOCKERFILE_PATH: $(DOCKERFILE_PATH)
           AZURE_CONTAINER_REGISTRY: $(AZURE_CONTAINER_REGISTRY)
 
-  # The image is built on every trigger; the chart bump is gated by
-  # ENABLE_CHART_BUMP above so the first runs push an image and touch nothing in
-  # genesis-v3-charts. `develop` is cut from tag v3.3.0 and is the permanent
-  # home of the Entra patch — it is never merged into master, which tracks
-  # upstream past 3.3.0 — so it is the release branch for this image.
-  - stage: ImageTagUpdate
-    displayName: 'Update Image Tag in genesis-v3-charts'
-    dependsOn: Build
+  # Runs in PARALLEL with Build: both depend only on Version and both use the
+  # same $(Build.BuildNumber), so the chart can stamp the image tag itself
+  # instead of waiting. Same fan-out as genesis-openfga.
+  - stage: PublishChart
+    displayName: 'Publish genesis-umami chart to OCI'
+    dependsOn: Version
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - template: templates/helmpublish.yml
+        parameters:
+          CHART_NAME: genesis-umami
+
+  # Fan-in: the umbrella may only be pointed at a chart version once BOTH the
+  # image and the chart exist in their registries.
+  #
+  # Gated by ENABLE_CHART_BUMP so the first runs publish both artifacts and touch
+  # genesis-v3-charts not at all. Flip it to 'true' in the same change that
+  # switches the umbrella's genesis-umami dependency from the in-tree
+  # file://charts/umami to oci://platformhelm.azurecr.io/helm — until then a
+  # version bump there would have no effect, and release-template.yml refuses to
+  # run rather than write one silently.
+  - stage: UpdateUmbrella
+    displayName: 'Bump chart version in genesis-v3-charts'
+    dependsOn:
+      - Build
+      - PublishChart
     condition: >-
       and(succeeded(),
           eq(variables['ENABLE_CHART_BUMP'], 'true'),
