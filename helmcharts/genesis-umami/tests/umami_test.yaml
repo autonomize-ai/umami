@@ -1,0 +1,643 @@
+suite: genesis-umami optional analytics bundle
+release:
+  name: genesis
+  namespace: genesis
+tests:
+  # ---------------------------------------------------------------------------
+  # Default-off. The umbrella gates this with `condition: genesis-umami.enabled`,
+  # but the subchart must also render nothing when installed standalone.
+  # ---------------------------------------------------------------------------
+  - it: renders nothing at all when disabled (the shipped default)
+    templates:
+      - templates/secret.yaml
+      - templates/service.yaml
+      - templates/deployment.yaml
+      - templates/postgresql.yaml
+      - templates/ingress.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # NOTES.txt is the one template that always renders, so it needs its own
+  # guard — otherwise a disabled install prints port-forward instructions for a
+  # Service that was never created.
+  - it: tells the user it is disabled rather than advertising a Service that does not exist
+    templates:
+      - templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: Umami analytics is DISABLED
+      - notMatchRegexRaw:
+          pattern: Port-forward
+
+  - it: prints the real access instructions once enabled
+    set:
+      enabled: true
+    templates:
+      - templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: Umami analytics \(3\.3\.0\) is enabled
+      - matchRegexRaw:
+          pattern: Port-forward
+
+  - it: renders the full bundled stack when enabled
+    set:
+      enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/deployment.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/secret.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/service.yaml
+      # postgresql.yaml carries both the PG Service and the StatefulSet
+      - hasDocuments:
+          count: 2
+        template: templates/postgresql.yaml
+
+  # ---------------------------------------------------------------------------
+  # Bundled-Postgres credentials. The regression guard: DATABASE_URL and
+  # POSTGRES_PASSWORD are rendered from ONE resolved password. Resolving twice
+  # minted two different randoms on a first install, so Postgres initialised
+  # with one password while Umami connected with another.
+  # ---------------------------------------------------------------------------
+  - it: threads a single explicit password into both DATABASE_URL and POSTGRES_PASSWORD
+    set:
+      enabled: true
+      postgresql.auth.password: s3cr3t-shared
+    template: templates/secret.yaml
+    asserts:
+      - equal:
+          path: stringData.DATABASE_URL
+          value: postgresql://umami:s3cr3t-shared@genesis-genesis-umami-postgresql:5432/umami
+      - equal:
+          path: stringData.POSTGRES_PASSWORD
+          value: s3cr3t-shared
+
+  - it: generates one password of the same shape for both keys when none is set
+    set:
+      enabled: true
+    template: templates/secret.yaml
+    asserts:
+      # 24-char alphanumeric, embedded in the URL and mirrored in POSTGRES_PASSWORD.
+      - matchRegex:
+          path: stringData.DATABASE_URL
+          pattern: ^postgresql://umami:[A-Za-z0-9]{24}@genesis-genesis-umami-postgresql:5432/umami$
+      - matchRegex:
+          path: stringData.POSTGRES_PASSWORD
+          pattern: ^[A-Za-z0-9]{24}$
+      - matchRegex:
+          path: stringData.APP_SECRET
+          pattern: ^[A-Za-z0-9]{40}$
+
+  - it: has the Postgres StatefulSet read its password from the chart Secret, never inline
+    set:
+      enabled: true
+      postgresql.auth.password: s3cr3t-shared
+    template: templates/postgresql.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[1].name
+          value: POSTGRES_PASSWORD
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef.name
+          value: genesis-genesis-umami
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef.key
+          value: POSTGRES_PASSWORD
+      - notExists:
+          path: spec.template.spec.containers[0].env[1].value
+
+  # ---------------------------------------------------------------------------
+  # Image pinning and the image-defined UIDs.
+  # ---------------------------------------------------------------------------
+  - it: pins the bundled Postgres by digest so a major bump cannot land on an existing PVC
+    set:
+      enabled: true
+    template: templates/postgresql.yaml
+    documentIndex: 1
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: ^cgr\.dev/chainguard/postgres@sha256:[a-f0-9]{64}$
+
+  - it: falls back to the tag when the digest is cleared (ACR mirror path)
+    set:
+      enabled: true
+      postgresql.image.digest: ""
+      postgresql.image.repository: sprintregistry.azurecr.io/chainguard/postgres
+      postgresql.image.tag: "17"
+    template: templates/postgresql.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: sprintregistry.azurecr.io/chainguard/postgres:17
+
+  - it: pins the Umami app to the platform image at an exact version, never a floating tag
+    set:
+      enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      # Deliberately NOT an equality check on the tag: the ADO pipeline in
+      # autonomize-ai/umami rewrites image.tag on every build of its develop
+      # branch, so asserting the exact value would fail on each bump. Assert the
+      # things that must never drift instead.
+      #
+      # The registry+repository matter because the STOCK upstream image cannot do
+      # Entra auth at all; if this ever reverts to ghcr.io/umami-software/umami,
+      # managed-identity deployments break at the first database connection.
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^sprintregistry\\.azurecr\\.io/genesis-umami:"
+      # Guards against a floating tag creeping back in: Umami owns a schema, so
+      # `latest` would let a major bump and its migration land on a restart.
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^sprintregistry\\.azurecr\\.io/genesis-umami:\\d+\\.\\d+\\.\\d+"
+
+  - it: lets a digest pin override the app tag
+    set:
+      enabled: true
+      image.digest: "sha256:77264ce6951c6b131a91d99f1cfd720d9efac1eaaa12e104f21cf49408dd77e0"
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: sprintregistry.azurecr.io/genesis-umami@sha256:77264ce6951c6b131a91d99f1cfd720d9efac1eaaa12e104f21cf49408dd77e0
+
+  - it: relocates the app image to a customer registry
+    set:
+      enabled: true
+      global.imageRegistry: customer.azurecr.io
+    template: templates/deployment.yaml
+    asserts:
+      # customer-registry-first installs: every platform image must move together
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^customer\\.azurecr\\.io/genesis-umami:"
+
+  - it: never rewrites the bundled Postgres registry
+    set:
+      enabled: true
+      global.imageRegistry: customer.azurecr.io
+    template: templates/postgresql.yaml
+    documentIndex: 1
+    asserts:
+      # The bundled Postgres is pulled from Chainguard directly, not the platform
+      # ACR, so global.imageRegistry must NOT be prefixed onto it — that would
+      # produce customer.azurecr.io/cgr.dev/chainguard/postgres.
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^cgr\\.dev/chainguard/postgres@sha256:"
+
+  - it: runs Postgres as the Chainguard image's own postgres account (UID/GID 70)
+    set:
+      enabled: true
+    template: templates/postgresql.yaml
+    documentIndex: 1
+    asserts:
+      # initdb resolves its effective UID against /etc/passwd and hard-fails
+      # under anything else — 999 (Debian) or 65532 both break this image.
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 70
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 70
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+
+  - it: runs Umami as its image's nextjs account, non-root
+    set:
+      enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 1001
+      - equal:
+          path: spec.template.spec.securityContext.runAsGroup
+          value: 65533
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+
+  # ---------------------------------------------------------------------------
+  # External database paths.
+  # ---------------------------------------------------------------------------
+  - it: deploys no bundled Postgres when using an external database
+    set:
+      enabled: true
+      database.bundled: false
+      database.external.url: postgresql://u:p@db.example.com:5432/umami
+    templates:
+      - templates/postgresql.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: uses the supplied external URL and omits POSTGRES_PASSWORD
+    set:
+      enabled: true
+      database.bundled: false
+      database.external.url: postgresql://u:p@db.example.com:5432/umami
+    template: templates/secret.yaml
+    asserts:
+      - equal:
+          path: stringData.DATABASE_URL
+          value: postgresql://u:p@db.example.com:5432/umami
+      - notExists:
+          path: stringData.POSTGRES_PASSWORD
+
+  - it: fails clearly when an external DB is selected with no URL and no existingSecret
+    set:
+      enabled: true
+      database.bundled: false
+    template: templates/secret.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "database.external.url is required when database.bundled=false with password auth and no existingSecret is set"
+
+  # existingSecret contract: it supplies DATABASE_URL only. APP_SECRET stays
+  # chart-owned, so a user Secret holding just DATABASE_URL is a valid config.
+  - it: leaves DATABASE_URL out of the chart Secret when an existingSecret is supplied
+    set:
+      enabled: true
+      database.bundled: false
+      database.existingSecret: my-umami-db
+    template: templates/secret.yaml
+    asserts:
+      - notExists:
+          path: stringData.DATABASE_URL
+      - isNotEmpty:
+          path: stringData.APP_SECRET
+
+  - it: reads DATABASE_URL from the existingSecret but APP_SECRET from the chart Secret
+    set:
+      enabled: true
+      database.bundled: false
+      database.existingSecret: my-umami-db
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[1].name
+          value: DATABASE_URL
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef.name
+          value: my-umami-db
+      - equal:
+          path: spec.template.spec.containers[0].env[2].name
+          value: APP_SECRET
+      - equal:
+          path: spec.template.spec.containers[0].env[2].valueFrom.secretKeyRef.name
+          value: genesis-genesis-umami
+
+  # ---------------------------------------------------------------------------
+  # Managed identity (Microsoft Entra) against an existing customer database.
+  # ---------------------------------------------------------------------------
+  - it: builds a passwordless DATABASE_URL with schema and TLS under managed identity
+    set:
+      enabled: true
+      database.bundled: false
+      database.authMethod: managed-identity
+      database.external.host: customer-pg.postgres.database.azure.com
+      database.external.user: umami-identity
+    template: templates/secret.yaml
+    asserts:
+      # No credential in the URL: the token is fetched per connection instead.
+      - equal:
+          path: stringData.DATABASE_URL
+          value: postgresql://umami-identity@customer-pg.postgres.database.azure.com:5432/umami?schema=umami&sslmode=require
+      - notExists:
+          path: stringData.POSTGRES_PASSWORD
+
+  - it: inherits host, user, port and sslMode from the platform's global.database
+    set:
+      enabled: true
+      database.bundled: false
+      global.database.authMethod: managed-identity
+      global.database.host: shared.postgres.database.azure.com
+      global.database.username: platform-identity
+      global.database.port: 5433
+      global.database.sslMode: verify-full
+    template: templates/secret.yaml
+    asserts:
+      # A customer overlay that already configures the platform database needs
+      # no umami-specific connection settings at all.
+      - equal:
+          path: stringData.DATABASE_URL
+          value: postgresql://platform-identity@shared.postgres.database.azure.com:5433/umami?schema=umami&sslmode=verify-full
+
+  # The underscore spelling is accepted by the umbrella prereq guard, by
+  # genesis-de-db-auth-secret.yaml and by GLOBAL-VALUES-REFERENCE.md. Matching
+  # only the hyphen would drop this overlay into the password branch and fail
+  # the whole umbrella render on a missing external.url.
+  - it: treats the underscore spelling of managed_identity as managed identity
+    set:
+      enabled: true
+      database.bundled: false
+      global.database.authMethod: managed_identity
+      global.database.host: shared.postgres.database.azure.com
+      global.database.username: platform-identity
+    template: templates/secret.yaml
+    asserts:
+      - equal:
+          path: stringData.DATABASE_URL
+          value: postgresql://platform-identity@shared.postgres.database.azure.com:5432/umami?schema=umami&sslmode=require
+
+  - it: wires workload identity onto the pod when managed identity is active
+    set:
+      enabled: true
+      database.bundled: false
+      database.authMethod: managed-identity
+      database.external.host: db.example.com
+      database.external.user: umami-identity
+      serviceAccount.create: true
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["azure.workload.identity/use"]
+          value: "true"
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: genesis-genesis-umami
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AZURE_USE_MANAGED_IDENTITY
+            value: "true"
+
+  # The default (create=false, name="") must NOT leave the pod on the namespace
+  # `default` SA: Workload Identity projects its token onto the pod's SA, so a
+  # blank SA renders full Azure wiring that cannot work. Inheriting the shared
+  # platform SA also brings its annotations and pull secrets along.
+  - it: inherits the platform ServiceAccount when not creating its own
+    set:
+      enabled: true
+      database.bundled: false
+      database.authMethod: managed-identity
+      database.external.host: db.example.com
+      database.external.user: umami-identity
+      global.serviceAccount.name: genesis-platform-sa
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: genesis-platform-sa
+
+  - it: keeps the pod off a nonexistent SA when installed standalone
+    set:
+      enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      # No global (standalone install) => no serviceAccountName rather than a
+      # hardcoded genesis-platform-sa, which would not exist and would stop the
+      # pod from starting.
+      - notExists:
+          path: spec.template.spec.serviceAccountName
+
+  - it: annotates the ServiceAccount with the platform managed identity
+    set:
+      enabled: true
+      database.bundled: false
+      database.authMethod: managed-identity
+      database.external.host: db.example.com
+      database.external.user: umami-identity
+      serviceAccount.create: true
+      global.managedIdentity.enabled: true
+      global.managedIdentity.azure.clientId: 11111111-2222-3333-4444-555555555555
+      global.managedIdentity.azure.tenantId: 66666666-7777-8888-9999-000000000000
+    template: templates/serviceaccount.yaml
+    asserts:
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: metadata.annotations["azure.workload.identity/client-id"]
+          value: 11111111-2222-3333-4444-555555555555
+      - equal:
+          path: metadata.annotations["azure.workload.identity/tenant-id"]
+          value: 66666666-7777-8888-9999-000000000000
+
+  - it: stamps platform-wide ServiceAccount annotations onto a chart-created SA
+    set:
+      enabled: true
+      serviceAccount.create: true
+      global.managedIdentity.enabled: true
+      global.managedIdentity.azure.clientId: 11111111-2222-3333-4444-555555555555
+      global.managedIdentity.azure.tenantId: 66666666-7777-8888-9999-000000000000
+      global.serviceAccount.annotations:
+        cost-centre: analytics
+      serviceAccount.annotations:
+        owner: platform
+    template: templates/serviceaccount.yaml
+    asserts:
+      # genesis-lib merges global.serviceAccount.annotations; umami must too, or
+      # an org that stamps every SA platform-wide finds umami's the one exception.
+      - equal:
+          path: metadata.annotations["cost-centre"]
+          value: analytics
+      - equal:
+          path: metadata.annotations["owner"]
+          value: platform
+      # ...without dropping the workload-identity pair
+      - equal:
+          path: metadata.annotations["azure.workload.identity/client-id"]
+          value: 11111111-2222-3333-4444-555555555555
+
+  - it: adds no managed-identity wiring under password auth
+    set:
+      enabled: true
+      database.bundled: false
+      database.external.url: postgresql://u:p@db.example.com:5432/umami
+    template: templates/deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.metadata.labels["azure.workload.identity/use"]
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AZURE_USE_MANAGED_IDENTITY
+            value: "true"
+
+  - it: renders no ServiceAccount unless asked for one
+    set:
+      enabled: true
+      # Inheriting the platform SA must not also mint a second one alongside it.
+      global.serviceAccount.name: genesis-platform-sa
+    templates:
+      - templates/serviceaccount.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # ---------------------------------------------------------------------------
+  # APP_SECRET ownership and registry credentials.
+  # ---------------------------------------------------------------------------
+  - it: reads APP_SECRET from an external Secret when one is supplied
+    set:
+      enabled: true
+      app.existingSecret: umami-kv
+      app.existingSecretKey: UMAMI_APP_SECRET
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[2].valueFrom.secretKeyRef.name
+          value: umami-kv
+      - equal:
+          path: spec.template.spec.containers[0].env[2].valueFrom.secretKeyRef.key
+          value: UMAMI_APP_SECRET
+
+  - it: stops generating APP_SECRET once an external one is supplied
+    set:
+      enabled: true
+      app.existingSecret: umami-kv
+    template: templates/secret.yaml
+    asserts:
+      # Otherwise the chart would keep minting a value nothing consumes — and
+      # under GitOps that rewrite would show as perpetual drift.
+      - notExists:
+          path: stringData.APP_SECRET
+
+  # The platform declares registry credentials at
+  # global.serviceAccount.imagePullSecrets.{enabled,secretNames} — the shape
+  # genesis-lib reads and every env-values overlay sets. Reading the
+  # Bitnami-style global.imagePullSecrets instead yields a silent blank, i.e.
+  # ImagePullBackOff once image.repository points at the ACR mirror.
+  - it: reads image pull secrets from the platform global
+    set:
+      enabled: true
+      global.serviceAccount.imagePullSecrets.enabled: true
+      global.serviceAccount.imagePullSecrets.secretNames:
+        - acr-auth
+        - ghcr-auth
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.imagePullSecrets[0].name
+          value: acr-auth
+      - equal:
+          path: spec.template.spec.imagePullSecrets[1].name
+          value: ghcr-auth
+
+  - it: ignores platform pull secrets that are declared but switched off
+    set:
+      enabled: true
+      global.serviceAccount.imagePullSecrets.enabled: false
+      global.serviceAccount.imagePullSecrets.secretNames:
+        - acr-auth
+    template: templates/deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.imagePullSecrets
+
+  - it: lets a chart-local imagePullSecrets override the platform global
+    set:
+      enabled: true
+      imagePullSecrets:
+        - name: my-own-registry
+      global.serviceAccount.imagePullSecrets.enabled: true
+      global.serviceAccount.imagePullSecrets.secretNames:
+        - acr-auth
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.imagePullSecrets[0].name
+          value: my-own-registry
+      - lengthEqual:
+          path: spec.template.spec.imagePullSecrets
+          count: 1
+
+  - it: reads the connection string from a namespaced key in a shared Secret
+    set:
+      enabled: true
+      database.bundled: false
+      database.existingSecret: ai-studio-secrets
+      database.existingSecretKey: UMAMI_DATABASE_URL
+    template: templates/deployment.yaml
+    asserts:
+      # Sharing the platform Secret requires a namespaced key: a plain
+      # DATABASE_URL in a Secret nearly every pod mounts would collide with the
+      # next service wanting one.
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef.name
+          value: ai-studio-secrets
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef.key
+          value: UMAMI_DATABASE_URL
+
+  - it: defaults the connection-string key to DATABASE_URL
+    set:
+      enabled: true
+      database.bundled: false
+      database.existingSecret: umami-db
+    template: templates/deployment.yaml
+    asserts:
+      # Back-compat: existing users set only existingSecret and must keep working.
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef.key
+          value: DATABASE_URL
+
+  # ---------------------------------------------------------------------------
+  # Storage and ingress gating.
+  # ---------------------------------------------------------------------------
+  - it: uses a PVC by default and an emptyDir when persistence is off
+    set:
+      enabled: true
+      postgresql.persistence.enabled: false
+    template: templates/postgresql.yaml
+    documentIndex: 1
+    asserts:
+      - notExists:
+          path: spec.volumeClaimTemplates
+      - equal:
+          path: spec.template.spec.volumes[0].emptyDir
+          value: {}
+
+  - it: claims persistent storage at the configured size by default
+    set:
+      enabled: true
+    template: templates/postgresql.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.volumeClaimTemplates[0].spec.resources.requests.storage
+          value: 5Gi
+
+  - it: renders no Ingress by default, and one when explicitly enabled
+    set:
+      enabled: true
+    templates:
+      - templates/ingress.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the Ingress against the umami Service when enabled
+    set:
+      enabled: true
+      ingress.enabled: true
+      ingress.host: analytics.example.com
+      ingress.className: nginx
+    template: templates/ingress.yaml
+    asserts:
+      - isKind:
+          of: Ingress
+      - equal:
+          path: spec.rules[0].host
+          value: analytics.example.com
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.name
+          value: genesis-genesis-umami
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.port.number
+          value: 3000

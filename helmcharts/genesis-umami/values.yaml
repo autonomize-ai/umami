@@ -1,0 +1,237 @@
+# =============================================================================
+# genesis-umami — self-hosted Umami analytics (MIT). DEFAULT-OFF.
+# =============================================================================
+# Gated at the umbrella by `genesis-umami.enabled` (false by default), so this
+# renders nothing unless explicitly turned on. When enabled it deploys Umami
+# plus, by default, an in-chart PostgreSQL — or bring your own DB.
+# =============================================================================
+
+# Mirror of the umbrella condition so the subchart can also be used standalone.
+enabled: false
+
+replicaCount: 1
+
+image:
+  # helm-guard-exempt: built from autonomize-ai/umami — the MIT fork carrying the
+  # Microsoft Entra patch — on upstream's node:22-alpine base, not Chainguard.
+  # Umami is a Next.js app shipping its own Dockerfile; rebasing that onto Wolfi
+  # is fork-maintenance this default-off bundle does not justify. Scoped to a
+  # default-off subchart: nothing pulls it unless genesis-umami.enabled=true.
+  #
+  # The stock ghcr.io/umami-software/umami image CANNOT be used with
+  # database.authMethod=managed-identity: it reads a static DATABASE_URL and has
+  # no Entra support. That is why this is a platform-built image.
+  #
+  # Bare repository name, composed with global.imageRegistry like every other
+  # platform image, so `--set global.imageRegistry=<customer-acr>` relocates it
+  # for customer-registry-first installs.
+  #
+  # amd64 only. A Node/Next.js build cannot cross-compile, so an arm64 leg runs
+  # under QEMU emulation — it ran >24 min without finishing and was dropped from
+  # the pipeline. AKS runs amd64; local k3d on Apple Silicon builds natively.
+  repository: genesis-umami
+  # CI-managed: the ADO pipeline in autonomize-ai/umami writes this on every
+  # build of its `develop` branch (`<upstream>-mi.<counter>`). Pinned to an exact
+  # tag deliberately — `latest` would let a major bump, and its schema migration,
+  # land on a restart with nobody deciding to.
+  tag: "3.3.0-mi.2"
+  # Optional digest pin (takes precedence over tag). Must stay empty: a digest
+  # silently overrides the tag, so the pipeline's bump would become a no-op — its
+  # release step refuses to run if this is set.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Pull secrets for a private registry (e.g. the org ACR mirror). Usually
+# unnecessary: with the default serviceAccount settings the pod inherits
+# genesis-platform-sa, which already carries them. Falls back to the platform's
+# own global.serviceAccount.imagePullSecrets.{enabled,secretNames} — NOT the
+# Bitnami-style global.imagePullSecrets, which no values file here sets.
+# Shape is the standard [{name: my-secret}]; global uses plain secretNames.
+imagePullSecrets: []
+
+serviceAccount:
+  # A ServiceAccount is REQUIRED for Azure Workload Identity: the federated
+  # token is projected onto the pod's SA, and Entra trusts a specific
+  # SA+namespace pair.
+  #
+  # create: false does NOT mean "no identity" — with `name` also empty the pod
+  # inherits the platform's shared SA (global.serviceAccount.name, normally
+  # genesis-platform-sa), which the umbrella already creates with the
+  # workload-identity annotations and the registry pull secrets. That is how
+  # every other platform service gets its identity, and it needs no Entra
+  # change: the federated credential for that SA already exists.
+  #
+  # Set true only for a DEDICATED identity (e.g. narrower database grants) —
+  # a new SA means registering a new federated credential in Entra for it.
+  create: false
+  # Reuse a specific existing SA instead. Empty inherits the platform's.
+  name: ""
+  # Extra annotations, applied to a chart-created SA. The
+  # azure.workload.identity/{client-id,tenant-id} pair is added automatically
+  # from global.managedIdentity — no need to repeat it.
+  annotations: {}
+
+app:
+  # APP_SECRET signs Umami's auth tokens. Leave empty to auto-generate a stable
+  # secret on first install (reused on upgrade via a cluster lookup). Set
+  # explicitly for GitOps/reproducible installs.
+  appSecret: ""
+  # Read APP_SECRET from a Secret you manage (e.g. one projected from Key Vault
+  # by External Secrets) instead of letting this chart own it.
+  #
+  # REQUIRED under Argo CD / any GitOps renderer: the generate-once path relies
+  # on a cluster `lookup`, which is always empty under `helm template`, so the
+  # value would be re-minted on every sync and log every user out. Same reasoning
+  # as genesis/templates/01-internal-secrets.yaml.
+  existingSecret: ""
+  existingSecretKey: APP_SECRET
+  # Disable Umami's anonymous telemetry to the upstream project by default.
+  disableTelemetry: true
+  # Extra raw env vars (list of {name, value}) passed to the Umami container.
+  extraEnv: []
+
+# ---- Database ---------------------------------------------------------------
+# How Umami is pointed at a database depends on authMethod — the two paths read
+# DIFFERENT keys, so a field that matters in one is ignored in the other.
+#
+#   bundled=true          -> short-circuits everything and deploys an in-chart
+#                            PostgreSQL. Nothing below is read.
+#
+#   authMethod=password   -> database.existingSecret (a Secret you manage holding
+#                            a DATABASE_URL key), else database.external.url — a
+#                            whole connection string, so a plaintext password
+#                            never has to live in values.yaml. The structured
+#                            host/port/user/sslMode fields are NOT read here, and
+#                            omitting `url` is a render error, not a fallback.
+#
+#   authMethod=           -> database.existingSecret, else the structured
+#     managed-identity       host/port/user/name/schema/sslMode fields, each
+#                            falling back to the matching global.database value.
+#                            `url` is ignored: a connection string is read once
+#                            and cannot carry a token that expires hourly.
+#
+# APP_SECRET is never read from database.existingSecret — see app.existingSecret.
+database:
+  # true  -> in-chart PostgreSQL StatefulSet (turnkey; local/dev only).
+  # false -> use an existing server, which is what customer environments do.
+  bundled: true
+
+  # password         -> credentials come from the URL or existingSecret.
+  # managed-identity -> no password anywhere: the app requests a short-lived
+  #                     Microsoft Entra token per connection. Requires an image
+  #                     with Entra support and Workload Identity on the pod.
+  #
+  # managed-identity means AZURE Entra specifically. The image acquires tokens
+  # through DefaultAzureCredential for the Azure PostgreSQL scope, so there is no
+  # AWS path: RDS IAM auth is a different mechanism, where the signed token IS
+  # the password. On AWS use authMethod=password with database.existingSecret.
+  # (The platform makes the same assumption: genesis-lib emits
+  # AZURE_USE_MANAGED_IDENTITY for any managed-identity auth without checking
+  # global.managedIdentity.provider, so this is not umami-specific.)
+  # Empty inherits global.database.authMethod, so an environment that already
+  # runs the platform on managed identity gets the same treatment here.
+  authMethod: ""
+
+  external:
+    # Full connection string. Password auth only — leave empty for MI.
+    url: ""
+    # Structured fields. Each falls back to the matching global.database value,
+    # so in most environments only `name` and `schema` need setting here.
+    host: ""                        # "" => global.database.host
+    port: 0                         # 0  => global.database.port (default 5432)
+    user: ""                        # "" => global.database.username
+    name: "umami"                   # the database to connect to
+    # Postgres schema to isolate Umami's ~25 tables inside a shared database.
+    # Empty uses the connection's default search_path.
+    schema: "umami"
+    sslMode: ""                     # "" => global.database.sslMode, else "require"
+
+  existingSecret: ""                # Secret holding the connection string
+  # Key within that Secret. Configurable so umami can share the platform
+  # Secret (ai-studio-secrets) instead of needing one of its own — a shared
+  # Secret needs a namespaced key, e.g. UMAMI_DATABASE_URL, because plain
+  # DATABASE_URL in a Secret every pod mounts would collide with the next
+  # service that wants one. Mirrors app.existingSecretKey.
+  existingSecretKey: DATABASE_URL
+
+postgresql:
+  image:
+    # helm-guard-exempt: upstream Chainguard (Wolfi) Postgres for the optional,
+    # default-off bundled DB. Not mirrored to sprintregistry because this chart
+    # never renders unless genesis-umami.enabled=true; repoint repository at the
+    # org mirror (e.g. sprintregistry.azurecr.io/chainguard/postgres) and clear
+    # `digest` when registry policy requires pulling from the internal ACR.
+    repository: cgr.dev/chainguard/postgres
+    # Chainguard's PUBLIC postgres repo publishes only `latest`/`latest-dev` —
+    # there are no versioned tags to pin to, and `latest` currently tracks
+    # PostgreSQL 18.x. A floating tag would let a major-version jump land on an
+    # existing PVC and refuse to start ("database files are incompatible"), so
+    # the digest below pins the exact image. Bump it deliberately (and plan a
+    # dump/restore across a major bump). Set digest: "" to follow `tag` instead
+    # — e.g. when pulling a versioned tag from the ACR mirror.
+    tag: "latest"
+    digest: "sha256:cc0ad418b90ee621ad4c258cfc62f8a605bc2a53e105647517d8992b89a12978"
+    pullPolicy: IfNotPresent
+  # The Chainguard image's postgres account is UID/GID 70 (`postgres:x:70:70`),
+  # NOT the Debian-postgres 999 nor the platform's usual 65532. initdb resolves
+  # its effective UID against /etc/passwd and hard-fails ("could not look up
+  # effective user ID") under any other value, so this is dictated by the
+  # upstream image. helm-guard-exempt: third-party image UID.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 70
+    runAsGroup: 70
+    fsGroup: 70
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+  auth:
+    username: umami
+    # Leave empty: a strong password is generated on first install and stored
+    # in the chart Secret (reused on upgrade). No default credential is shipped.
+    # Set explicitly only for GitOps/reproducible installs.
+    password: ""
+    database: umami
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: umami.local
+  tls: []                          # [{secretName: umami-tls, hosts: [umami.local]}]
+
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits: { cpu: 500m, memory: 512Mi }
+
+# Umami's image runs as its own `nextjs` account — `nextjs:x:1001:65533`, i.e.
+# UID 1001 with primary GID 65533 (nogroup), not the platform's 65532. The /app
+# tree is owned by that UID/GID, so overriding it breaks startup. Values below
+# mirror the image exactly. helm-guard-exempt: third-party image UID; non-root.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 65533
+  fsGroup: 65533
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
