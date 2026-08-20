@@ -1,0 +1,20 @@
+apiVersion: v2
+name: genesis-umami
+description: >-
+  Self-hosted Umami web analytics (MIT-licensed umami-software/umami) for the
+  Genesis platform. Optional, DEFAULT-OFF bundle — enable via
+  genesis-umami.enabled. Ships Umami + an optional in-chart PostgreSQL so the
+  analytics stack is turnkey, or point it at an external Postgres.
+type: application
+version: 0.1.0
+appVersion: "3.3.0"
+keywords:
+  - analytics
+  - umami
+  - privacy
+home: https://umami.is
+sources:
+  - https://github.com/umami-software/umami
+maintainers:
+  - name: Platform Team
+    email: jagveer@autonomize.ai

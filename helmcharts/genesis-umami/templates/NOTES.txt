@@ -1,0 +1,41 @@
+{{- if not .Values.enabled }}
+Umami analytics is DISABLED — this release created no resources.
+
+Set genesis-umami.enabled=true (umbrella) or enabled=true (standalone) to deploy
+Umami plus, by default, an in-chart PostgreSQL.
+{{- else }}
+Umami analytics ({{ .Chart.AppVersion }}) is enabled.
+
+Service: {{ include "umami.fullname" . }}:{{ .Values.service.port }} (ClusterIP)
+{{- if .Values.database.bundled }}
+Database: in-chart PostgreSQL ({{ include "umami.postgresql.fullname" . }}) — persistence {{ if .Values.postgresql.persistence.enabled }}ON ({{ .Values.postgresql.persistence.size }}){{ else }}OFF (emptyDir — data is ephemeral){{ end }}.
+{{- else if .Values.database.existingSecret }}
+Database: external (from secret {{ .Values.database.existingSecret }}).
+{{- else if include "umami.usesManagedIdentity" . }}
+Database: external — {{ include "umami.dbUser" . }}@{{ include "umami.dbHost" . }}:{{ include "umami.dbPort" . }}/{{ .Values.database.external.name }} via Microsoft Entra token auth (no password).
+{{- else }}
+Database: external (database.external.url).
+{{- end }}
+
+First run:
+  1. Port-forward:  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "umami.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  2. Open http://localhost:{{ .Values.service.port }} — default login is admin / umami (CHANGE IT IMMEDIATELY).
+  3. Add a website, copy its <data-website-id>, and point the app tracker (UMAMI_HOST / UMAMI_WEBSITE_ID) at this instance.
+
+{{- if .Values.app.existingSecret }}
+
+APP_SECRET is read from your Secret {{ .Values.app.existingSecret }} (key {{ .Values.app.existingSecretKey }}) —
+this chart neither generates nor stores it.
+{{- else if not .Values.app.appSecret }}
+
+NOTE: APP_SECRET was auto-generated and stored in the {{ include "umami.fullname" . }} Secret.
+For reproducible/GitOps installs, set genesis-umami.app.appSecret explicitly, or
+point genesis-umami.app.existingSecret at a Secret you manage.
+{{- end }}
+{{- if and .Values.database.bundled (not .Values.postgresql.auth.password) }}
+
+NOTE: the bundled PostgreSQL password was auto-generated and stored in the
+{{ include "umami.fullname" . }} Secret (key POSTGRES_PASSWORD). Set
+genesis-umami.postgresql.auth.password explicitly for GitOps/reproducible installs.
+{{- end }}
+{{- end }}

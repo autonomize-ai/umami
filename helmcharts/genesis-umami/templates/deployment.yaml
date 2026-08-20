@@ -1,0 +1,108 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "umami.fullname" . }}
+  labels:
+    {{- include "umami.labels" . | nindent 4 }}
+    app.kubernetes.io/component: umami
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "umami.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: umami
+  template:
+    metadata:
+      labels:
+        {{- include "umami.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: umami
+        {{- if include "umami.usesManagedIdentity" . }}
+        # Without this label the azure-workload-identity webhook injects nothing
+        # and no federated token reaches the pod, so DefaultAzureCredential finds
+        # no identity to use.
+        azure.workload.identity/use: "true"
+        {{- end }}
+    spec:
+      {{- with (include "umami.imagePullSecrets" . | trim) }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- with (include "umami.serviceAccountName" .) }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: umami
+          image: {{ include "umami.image" (dict "img" .Values.image "registry" (include "umami.imageRegistry" .)) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: DATABASE_TYPE
+              value: postgresql
+            {{- if include "umami.usesManagedIdentity" . }}
+            # Switches the image onto Entra token auth: it acquires a short-lived
+            # token per connection instead of reading a password. Requires an
+            # image built with that support.
+            - name: AZURE_USE_MANAGED_IDENTITY
+              value: "true"
+            {{- end }}
+            # DATABASE_URL comes from the user's existingSecret when set,
+            # otherwise from this chart's Secret.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.secretName" . }}
+                  key: {{ .Values.database.existingSecretKey | quote }}
+            # APP_SECRET comes from app.existingSecret when set (the GitOps
+            # path), otherwise from this chart's own Secret. It is never read
+            # from database.existingSecret, which carries DATABASE_URL only.
+            - name: APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.app.existingSecret }}
+                  name: {{ .Values.app.existingSecret | quote }}
+                  key: {{ .Values.app.existingSecretKey | quote }}
+                  {{- else }}
+                  name: {{ include "umami.fullname" . }}
+                  key: APP_SECRET
+                  {{- end }}
+            {{- if .Values.app.disableTelemetry }}
+            - name: DISABLE_TELEMETRY
+              value: "1"
+            {{- end }}
+            {{- with .Values.app.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /api/heartbeat
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/heartbeat
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
