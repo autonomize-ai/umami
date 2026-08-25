@@ -1,5 +1,26 @@
 -- CreateExtension
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- pgcrypto is only needed on PostgreSQL 12, where it supplies gen_random_uuid().
+-- That function moved into core in PostgreSQL 13, so on 13+ this extension is
+-- unused: nothing in the schema or in src/ calls a pgcrypto function, and the
+-- application's own crypto is node:crypto (src/lib/crypto.ts).
+--
+-- Managed providers restrict which extensions may be installed, and refuse the
+-- statement outright rather than ignoring it. Azure Database for PostgreSQL
+-- rejects any extension absent from its server-level `azure.extensions`
+-- allow-list with SQLSTATE 0A000, which fails this migration on its first
+-- statement and leaves the deployment unable to create any table at all.
+--
+-- Attempt it, and continue if the platform refuses. On PostgreSQL 12 where the
+-- extension is genuinely required and also blocked, the migration still fails —
+-- but later, at the first gen_random_uuid() call, with an error that names the
+-- missing function.
+DO $$
+BEGIN
+  EXECUTE 'CREATE EXTENSION IF NOT EXISTS "pgcrypto"';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'pgcrypto not installed (%): continuing, since gen_random_uuid() is built in from PostgreSQL 13', SQLERRM;
+END
+$$;
 
 -- CreateTable
 CREATE TABLE "user" (
