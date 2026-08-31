@@ -2,6 +2,12 @@ packages:
   - '**'
   - '!dist'
   - '!**/dist/**'
+# deepmerge-ts is pulled in transitively by @prisma/config, which pins it
+# exactly to 7.1.5 - the version CVE-2026-40345 / GHSA-ggr8-5vv4-36mx is filed
+# against. The pin is still exact in @prisma/config 7.10.0, so no prisma upgrade
+# reaches a patched release and an override is the only route to one.
+overrides:
+  deepmerge-ts: '^8.0.2'
 allowBuilds:
   '@parcel/watcher': false
   '@prisma/engines': true
