@@ -71,6 +71,15 @@ jobs:
       - script: |
           set -e
           git add genesis/Chart.yaml genesis/Chart.lock
+          # A re-run of a build whose number is already pinned stages nothing,
+          # and `git commit` on an empty index exits non-zero, which would fail
+          # the stage under `set -e` for a run that is in fact correct — the
+          # umbrella already says what this build would write. Nothing to push
+          # either, so stop here.
+          if git diff --cached --quiet; then
+            echo "genesis-umami already pinned to $(Build.BuildNumber) - nothing to do."
+            exit 0
+          fi
           git commit -m "[skip ci] genesis-umami chart version updated: $(Build.BuildNumber)"
           git push --set-upstream origin develop
         displayName: 'Push to genesis-v3-charts'

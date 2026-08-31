@@ -5,10 +5,16 @@
 # genesis-v3-charts/docs/SECURITY_OPENCOST.md §1 (container image = chart name),
 # the same shape as keycloak-custom -> genesis-idp and temporal -> genesis-de.
 #
-# The Helm chart is deliberately NOT in this repo: it lives in genesis-v3-charts
-# at genesis/charts/umami/ as a file:// subchart, alongside the other optional
-# third-party bundles (opencost, keda, external-secrets, observability). This
-# pipeline builds the image and bumps that chart's image.tag — nothing else.
+# The Helm chart lives in this repo, at helmcharts/genesis-umami — a chart lives
+# with the source when we own that source, the same shape as
+# genesis-openfga/helmcharts, keycloak-custom/helmcharts and temporal/helmcharts.
+# Charts for software we do NOT fork (keda, opencost, external-secrets,
+# observability) stay in the umbrella as file:// subcharts, having no repo of
+# their own.
+#
+# One run therefore produces three things: the image, the chart (both stamped
+# with the same build number), and a bump of the umbrella's pinned chart version
+# in genesis-v3-charts.
 #
 # This branch is cut from upstream tag v3.3.0; UPSTREAM_VERSION below must be
 # kept in step with whatever tag the branch is rebased onto.
@@ -23,8 +29,8 @@ resources:
       # RELEASE_CADENCE.md ("genesis-v3-charts/develop is populated by service
       # CI's [skip ci] auto-bumps"). Deliberately not the chart's feature
       # branch: that gets deleted when it merges, which would leave this ref
-      # dangling. The chart is not on develop yet, which is fine — ENABLE_CHART_BUMP
-      # is false, so nothing checks it out until the chart lands there.
+      # dangling. The umbrella's genesis-umami dependency is on develop, so this
+      # is the ref UpdateUmbrella reads and writes.
       ref: develop
 
 variables:
@@ -32,18 +38,21 @@ variables:
   # so a platform tag is always traceable to an upstream version.
   UPSTREAM_VERSION: '3.3.0'
 
-  # Auto-bump of the umami chart's image.tag in genesis-v3-charts.
+  # Auto-bump of the umbrella's pinned genesis-umami chart version in
+  # genesis-v3-charts.
   #
-  # Keep 'false' until that chart sets image.repository: genesis-umami. It still
-  # defaults to the stock ghcr.io image, which cannot do Entra auth at all, so
-  # writing an MI tag onto it would pin an image that does not exist there.
-  # Flip to 'true' in the same change that lands the chart PR.
+  # Enabled: both preconditions this waited on are met. The chart sets
+  # image.repository: genesis-umami (helmcharts/genesis-umami/values.yaml), and
+  # the umbrella takes the chart from oci://platformhelm.azurecr.io/helm rather
+  # than an in-tree file:// subchart, so a version written there now takes
+  # effect. While either was untrue a bump would have been silent or wrong,
+  # which is what kept this 'false'.
   #
-  # This is a separate switch from the branch check on purpose: 'not enabled
-  # yet' is a deliberate config state that should skip quietly, whereas 'enabled
-  # but the chart looks wrong' is an error that must fail loudly (see the
-  # repository/digest guards in templates/release-template.yml).
-  ENABLE_CHART_BUMP: 'false'
+  # Set it back to 'false' to stop the pipeline writing to genesis-v3-charts at
+  # all; the image and chart still publish. That is a quiet, deliberate skip,
+  # unlike 'enabled but the umbrella looks wrong', which the repository guard in
+  # templates/release-template.yml fails loudly on.
+  ENABLE_CHART_BUMP: 'true'
   patch: $[counter(variables['Build.SourceBranchName'], 0)]
   globalPatch: $[counter('umamiGlobalPatch', 0)]
 
@@ -117,12 +126,10 @@ stages:
   # Fan-in: the umbrella may only be pointed at a chart version once BOTH the
   # image and the chart exist in their registries.
   #
-  # Gated by ENABLE_CHART_BUMP so the first runs publish both artifacts and touch
-  # genesis-v3-charts not at all. Flip it to 'true' in the same change that
-  # switches the umbrella's genesis-umami dependency from the in-tree
-  # file://charts/umami to oci://platformhelm.azurecr.io/helm — until then a
-  # version bump there would have no effect, and release-template.yml refuses to
-  # run rather than write one silently.
+  # Gated by ENABLE_CHART_BUMP, now 'true': the umbrella takes genesis-umami from
+  # oci://platformhelm.azurecr.io/helm, so the version written here is the one it
+  # deploys. release-template.yml re-checks that repository and refuses to run
+  # rather than write a version that would have no effect.
   - stage: UpdateUmbrella
     displayName: 'Bump chart version in genesis-v3-charts'
     dependsOn:
