@@ -82,6 +82,96 @@ const SSO_TOKEN_TTL_MS = 23 * 60 * 60 * 1000;
 const log = (...args) => console.log('[bridge]', ...args);
 
 /**
+ * Register this app's paths with genesis-authz at startup.
+ *
+ * genesis-authz default-denies any URI it does not recognise -- a deliberate
+ * safety net so a new endpoint cannot ship with no authorization by accident.
+ * Umami's paths therefore have to be declared, or every request 403s before
+ * the gateway's platform-admin gate is ever consulted.
+ *
+ * Declared HERE rather than hardcoded into genesis-authz, per its own route
+ * registration contract: a service owns its route list and sends the whole
+ * thing on every boot, so the table converges without anyone editing another
+ * repository. Umami is third-party and cannot make this call itself, so the
+ * bridge -- which already sits in its pod and is our code -- makes it.
+ *
+ * `bypass` is the right kind: it means "skip the OpenFGA resource check, still
+ * require authentication". There is no Umami resource modelled in FGA, and the
+ * authorization for this tree is the gateway's requiredRoles gate.
+ */
+const AUTHZ_URL = (process.env.AUTHZ_INTERNAL_URL || '').replace(/\/$/, '');
+const AUTHZ_KEY = process.env.AUTHZ_INTERNAL_KEY || '';
+const ROUTE_SERVICE_NAME = process.env.AUTHZ_SERVICE_NAME || 'umami';
+// Umami's own routes reach six segments below its prefix (e.g.
+// /api/websites/{id}/event-data/values). The registration compiler anchors
+// every pattern and its widest param type matches a single segment, so a
+// subtree needs one row per depth. Nine covers today's tree with room for an
+// upstream release to add two more levels before this needs revisiting.
+const ROUTE_MAX_DEPTH = Number(process.env.AUTHZ_ROUTE_MAX_DEPTH || 9);
+
+function buildRoutePayload() {
+  const prefix = BASE_PATH || '/umami';
+  const routes = [{ kind: 'bypass', pattern_template: prefix, params: [] }];
+
+  for (let depth = 1; depth <= ROUTE_MAX_DEPTH; depth++) {
+    const names = Array.from({ length: depth }, (_, i) => `s${i}`);
+    routes.push({
+      kind: 'bypass',
+      pattern_template: `${prefix}/${names.map(n => `{${n}}`).join('/')}`,
+      // `any` is one path segment. Segment count is what the depth expresses.
+      params: names.map(name => ({ name, type: 'any' })),
+    });
+  }
+
+  return { service_name: ROUTE_SERVICE_NAME, routes };
+}
+
+async function registerRoutes(attempt = 1) {
+  if (!AUTHZ_URL || !AUTHZ_KEY) {
+    log('route registration skipped — AUTHZ_INTERNAL_URL/KEY not set');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${AUTHZ_URL}/internal/authz/routes/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Call': AUTHZ_KEY },
+      body: JSON.stringify(buildRoutePayload()),
+    });
+
+    if (res.ok) {
+      log(`registered ${ROUTE_MAX_DEPTH + 1} route patterns with genesis-authz`);
+      return;
+    }
+
+    const detail = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${detail.slice(0, 300)}`);
+  } catch (err) {
+    // Loud, because the dashboard 403s until this succeeds -- but never fatal.
+    // A transient authz outage at boot must not leave the route permanently
+    // broken until someone notices and restarts the pod, so this retries with
+    // backoff instead of giving up after one attempt.
+    log(`route registration attempt ${attempt} failed: ${err.message}`);
+    if (attempt >= 10) {
+      // Deliberately hedged. Registration is full-replace and the rows persist
+      // in genesis-authz's database, so a failure here is only fatal on an
+      // instance that has NEVER registered successfully. On every other one
+      // the previous rows are still serving and the dashboard is unaffected.
+      // Saying "/umami will 403" flatly was wrong, and wrong in the worst
+      // place: someone reading this line mid-incident would chase a dead end.
+      log(
+        'route registration gave up after 10 attempts. If this instance has ' +
+        'registered before, the existing rows in genesis-authz still apply and ' +
+        '/umami keeps working; only a first-ever registration leaves it 403ing. ' +
+        'Check genesis-authz health, then restart this pod to retry.',
+      );
+      return;
+    }
+    setTimeout(() => registerRoutes(attempt + 1), Math.min(30000, 2000 * attempt));
+  }
+}
+
+/**
  * The service account's own long-lived token. Umami's /api/auth/login issues a
  * token with NO expiry (saveAuth is called without one), so this is cached in
  * memory for the life of the pod and deliberately never reaches a browser.
@@ -96,7 +186,12 @@ async function getServiceToken() {
     throw new Error('UMAMI_STAFF_USER / UMAMI_STAFF_PASSWORD are not set');
   }
 
-  const res = await fetch(`${UMAMI}/api/auth/login`, {
+  // NOTE the BASE_PATH. The image is built with basePath baked in, so Umami
+  // serves its own API under that prefix too -- /umami/api/auth/login, not
+  // /api/auth/login. UMAMI stays prefix-free because proxied requests already
+  // carry it in req.url; only the calls the bridge makes ITSELF have to add it.
+  // Without this every sign-in fails with a bare 404 and the entry path 502s.
+  const res = await fetch(`${UMAMI}${BASE_PATH}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
@@ -127,7 +222,7 @@ async function getServiceToken() {
 async function mintBrowserToken() {
   const token = await getServiceToken();
 
-  const res = await fetch(`${UMAMI}/api/auth/sso`, {
+  const res = await fetch(`${UMAMI}${BASE_PATH}/api/auth/sso`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -261,4 +356,6 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   log(`listening on ${PORT}, proxying ${UMAMI}, base path "${BASE_PATH || '/'}"`);
+  // After listen, so a slow or unreachable authz cannot delay readiness.
+  registerRoutes();
 });

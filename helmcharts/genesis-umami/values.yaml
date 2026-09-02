@@ -362,6 +362,25 @@ bridge:
   port: 3001
   # Must match `requiredRoles` on the gateway's dashboard route.
   requiredRole: "platform-admin"
+  # Declare this app's paths to genesis-authz at startup.
+  #
+  # That service default-denies any URI it does not recognise, so without this
+  # every /umami request 403s before the gateway's role gate is even consulted.
+  #
+  # Registered from here rather than hardcoded into genesis-authz, per its own
+  # contract: a service sends its full route list on every boot and the table
+  # converges. Umami is third-party and cannot make the call, so the bridge
+  # does it. Registration is idempotent, so replicas racing is harmless.
+  routeRegistration:
+    enabled: true
+    url: "http://genesis-authz:8000"
+    serviceName: "umami"
+    # One row per path depth. authz's pattern compiler anchors every pattern
+    # and its widest param type matches a single segment, so a subtree cannot
+    # be expressed as one row. Umami's own routes reach six segments below the
+    # prefix; nine leaves room for an upstream release to add two more.
+    maxDepth: 9
+    internalKeySecretKey: "GENESIS_API_KEY"
   # Calls refused outright, whatever the Umami account's role.
   #
   # The account is a Umami admin so staff can actually work in the tool. These

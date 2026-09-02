@@ -170,6 +170,26 @@ spec:
               value: {{ trimSuffix "/" .Values.basePath | quote }}
             - name: BRIDGE_REQUIRED_ROLE
               value: {{ .Values.bridge.requiredRole | quote }}
+            {{- if .Values.bridge.routeRegistration.enabled }}
+            # genesis-authz default-denies unknown URIs, so this app's paths
+            # must be declared or every request 403s before the gateway's role
+            # gate is consulted. Declared by the bridge at startup via authz's
+            # own registration contract rather than hardcoded into that repo --
+            # a service owns its route list. Umami is third-party and cannot
+            # make the call itself; the bridge is our code in its pod.
+            - name: AUTHZ_INTERNAL_URL
+              value: {{ .Values.bridge.routeRegistration.url | quote }}
+            - name: AUTHZ_SERVICE_NAME
+              value: {{ .Values.bridge.routeRegistration.serviceName | quote }}
+            - name: AUTHZ_ROUTE_MAX_DEPTH
+              value: {{ .Values.bridge.routeRegistration.maxDepth | quote }}
+            - name: AUTHZ_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.staffSecretName" . }}
+                  key: {{ .Values.bridge.routeRegistration.internalKeySecretKey | quote }}
+                  optional: true
+            {{- end }}
             {{- with .Values.bridge.blockedCalls }}
             - name: BRIDGE_BLOCKED_CALLS
               value: {{ join "," . | quote }}
