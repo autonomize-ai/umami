@@ -73,26 +73,142 @@ spec:
             - name: DISABLE_TELEMETRY
               value: "1"
             {{- end }}
+            {{- if .Values.redis.enabled }}
+            # Redis, composed rather than supplied as a whole URL.
+            #
+            # The password already exists in the platform secret for every other
+            # Redis client on the cluster, so asking for a second copy of it
+            # baked into a connection string would be one more secret to rotate
+            # in lockstep and one more way for the two to drift.
+            #
+            # Kubernetes expands $(VAR) in an env value from an earlier env var
+            # on the SAME container, so REDIS_PASSWORD must stay above REDIS_URL.
+            #
+            # NOTE the password is interpolated raw. A password containing @ : /
+            # or ? would break URL parsing -- keep the generated value
+            # alphanumeric, or move to a whole-URL secret if that ever changes.
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret | default (include "umami.staffSecretName" .) }}
+                  key: {{ .Values.redis.passwordSecretKey | quote }}
+                  optional: true
+            - name: REDIS_URL
+              value: "{{ if .Values.redis.tls }}rediss{{ else }}redis{{ end }}://{{ .Values.redis.username }}:$(REDIS_PASSWORD)@{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+            {{- if and .Values.redis.tls .Values.redis.caCert.secretName }}
+            # Umami connects with node-redis, which on rediss:// verifies against
+            # NODE'S DEFAULT TRUST STORE. The platform's in-cluster Redis serves a
+            # cert-manager-issued cert whose CA is not in that store, so without
+            # this the client fails the handshake and every /api/auth/sso call
+            # -- the whole staff sign-in path -- returns 500.
+            #
+            # Other services get this from genesis-lib's REDIS_SSL_CA_CERTS. This
+            # chart deliberately has no genesis-lib dependency (it ships as a
+            # standalone bundle), so it mounts the CA itself.
+            #
+            # NODE_EXTRA_CA_CERTS ADDS to the default store rather than replacing
+            # it, so public TLS elsewhere in the app is unaffected.
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/redis-ca/ca.crt
+            {{- end }}
+            {{- end }}
             {{- with .Values.app.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- if and .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName }}
+          volumeMounts:
+            - name: redis-ca
+              mountPath: /etc/redis-ca
+              readOnly: true
+          {{- end }}
           ports:
             - name: http
               containerPort: 3000
+          {{- /* The image is built with BASE_PATH baked in (Next.js applies it
+                 at build time), so every route -- health included -- moves under
+                 that prefix. A probe on the bare path 404s and the pod never
+                 becomes ready. */}}
           readinessProbe:
             httpGet:
-              path: /api/heartbeat
+              path: {{ printf "%s/api/heartbeat" (trimSuffix "/" .Values.basePath) }}
               port: http
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /api/heartbeat
+              path: {{ printf "%s/api/heartbeat" (trimSuffix "/" .Values.basePath) }}
               port: http
             initialDelaySeconds: 30
             periodSeconds: 20
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.bridge.enabled }}
+        # Login bridge -- the only thing the gateway routes to.
+        #
+        # Umami has no SSO and cannot read the identity the gateway resolved,
+        # so a cleared platform admin would still meet its password prompt.
+        # This container mints a short-lived session for the read-only account
+        # on the entry path and hands the browser to Umami's own /sso page;
+        # everything else it proxies straight through.
+        #
+        # Same image as the app container, different command -- no second image
+        # to build, tag, or put through image scanning.
+        - name: bridge
+          image: {{ include "umami.image" (dict "img" .Values.image "registry" (include "umami.imageRegistry" .)) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["node", "bridge/server.mjs"]
+          env:
+            - name: BRIDGE_PORT
+              value: {{ .Values.bridge.port | quote }}
+            # Talks to the app container over the pod's loopback, so the
+            # bridge never depends on the Service that fronts it.
+            - name: UMAMI_INTERNAL_URL
+              value: "http://127.0.0.1:3000"
+            - name: BASE_PATH
+              value: {{ trimSuffix "/" .Values.basePath | quote }}
+            - name: BRIDGE_REQUIRED_ROLE
+              value: {{ .Values.bridge.requiredRole | quote }}
+            {{- with .Values.bridge.blockedCalls }}
+            - name: BRIDGE_BLOCKED_CALLS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: UMAMI_STAFF_USER
+              value: {{ .Values.staffSetup.username | quote }}
+            - name: UMAMI_STAFF_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.staffSecretName" . }}
+                  key: {{ .Values.staffSetup.passwordSecretKey | quote }}
+                  optional: true
+          ports:
+            - name: bridge
+              containerPort: {{ .Values.bridge.port }}
+          readinessProbe:
+            httpGet:
+              path: /bridge-healthz
+              port: bridge
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /bridge-healthz
+              port: bridge
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.bridge.resources | nindent 12 }}
+        {{- end }}
+      {{- if and .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName }}
+      volumes:
+        - name: redis-ca
+          secret:
+            secretName: {{ .Values.redis.caCert.secretName | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

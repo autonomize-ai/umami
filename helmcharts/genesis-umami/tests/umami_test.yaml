@@ -641,3 +641,130 @@ tests:
       - equal:
           path: spec.rules[0].http.paths[0].backend.service.port.number
           value: 3000
+
+  # ── Staff dashboard access ────────────────────────────────────────
+  - it: runs the staff setup as a post-install hook Job, not an init container
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - isKind:
+          of: Job
+      # An init container on the Deployment cannot do this work: it would block
+      # the very app container it has to call, and on a first install the
+      # Service has no endpoints at all.
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: post-install,post-upgrade
+      # ArgoCD ignores helm.sh hooks and dev is continuously ArgoCD-synced.
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/hook"]
+          value: PostSync
+
+  - it: derives a structurally valid uuid for the staff account
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/staff-setup-job.yaml
+    asserts:
+      # Pin the name at this index too. The assertion below is positional, and
+      # the index has already moved once when a variable was inserted above it
+      # -- without this, that shift shows up as a confusing regex failure
+      # against some unrelated value rather than "the order changed".
+      - equal:
+          path: spec.template.spec.containers[0].env[4].name
+          value: STAFF_ID
+      # Umami validates this strictly and rejects anything merely uuid-shaped,
+      # so the version ('4') and variant ('a') characters are load-bearing.
+      - matchRegex:
+          path: spec.template.spec.containers[0].env[4].value
+          pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$"
+
+  - it: runs the login bridge as a sidecar on the same image
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: bridge
+      # Same image, different command -- no second image to build, tag or scan.
+      - equal:
+          path: spec.template.spec.containers[1].command
+          value: ["node", "bridge/server.mjs"]
+      - equal:
+          path: spec.template.spec.containers[1].ports[0].containerPort
+          value: 3001
+
+  - it: points health probes at the base path the image was built with
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/deployment.yaml
+    asserts:
+      # Next.js bakes basePath at build time, so /api/heartbeat moves with it.
+      # A probe on the bare path 404s and the pod never becomes ready.
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /umami/api/heartbeat
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /umami/api/heartbeat
+
+  - it: omits the bridge and the setup Job when staff access is switched off
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: false
+      staffSetup.enabled: false
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+
+  - it: provisions the Keycloak client the gateway route needs
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: keycloak-client-setup
+      # Never created by hand: a manual client exists in one environment,
+      # is absent from staging and prod, and does not survive a realm rebuild.
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[1]
+          pattern: "keycloak-setup.sh$"
+
+  - it: pins consent off so single sign-on stays silent
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/keycloak-setup-configmap.yaml
+    asserts:
+      # With consent on, Keycloak interrupts even an existing session with an
+      # "allow access?" screen -- which defeats the SSO this route exists for.
+      - matchRegex:
+          path: data["keycloak-setup.sh"]
+          pattern: '"consentRequired": false'
+
+  - it: blocks only the two destructive Umami calls
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/deployment.yaml
+    asserts:
+      # The account is a Umami admin so staff can actually work in the tool;
+      # deleting a site is refused here instead, because the site id is derived
+      # and would be recreated empty on the next deploy, silently.
+      - matchRegex:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_BLOCKED_CALLS")].value
+          pattern: "DELETE:.*websites"
+      - matchRegex:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_BLOCKED_CALLS")].value
+          pattern: "reset"

@@ -70,6 +70,10 @@ variables:
   HELM_SERVICE_CONNECTION_NAME: platform-dev-1007
   CONTAINER_NAME: 'genesis-umami'
   DOCKERFILE_PATH: 'Dockerfile'
+  # Path prefix this app is served under. Must equal the gateway route prefix
+  # in genesis-v3-charts (env-values/values-*.yaml, umami-* routes). Build-time
+  # only -- see the BUILD_ARGS note in the Build stage below.
+  BASE_PATH: '/umami'
 
 trigger:
   branches:
@@ -83,6 +87,7 @@ trigger:
     include:
       - src/**
       - scripts/**
+      - bridge/**
       - prisma/**
       - package.json
       - pnpm-lock.yaml
@@ -110,6 +115,20 @@ stages:
           CONTAINER_NAME: $(IMAGE_NAME)
           DOCKERFILE_PATH: $(DOCKERFILE_PATH)
           AZURE_CONTAINER_REGISTRY: $(AZURE_CONTAINER_REGISTRY)
+          # BASE_PATH is baked at BUILD time, not read at runtime.
+          #
+          # next.config.ts reads process.env.BASE_PATH when `next build` runs
+          # and Next.js stamps it into every generated asset URL and router
+          # link; the runtime stage of the Dockerfile does not carry the var at
+          # all. Setting it through the chart's env would silently do nothing.
+          #
+          # The platform serves this app at genesis.<env>/umami, so the gateway
+          # route must NOT rewrite the prefix away -- the app now expects to see
+          # it. That makes this line and the umami-ingest route's proxy-rewrite
+          # a matched pair: the first image built with BASE_PATH set breaks
+          # event collection until the umbrella drops that rewrite. Ship the
+          # route change first; it is inert until this image lands.
+          BUILD_ARGS: '--build-arg BASE_PATH=$(BASE_PATH)'
 
   # Runs in PARALLEL with Build: both depend only on Version and both use the
   # same $(Build.BuildNumber), so the chart can stamp the image tag itself

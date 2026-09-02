@@ -1,0 +1,238 @@
+{{- if and .Values.enabled .Values.staffSetup.enabled }}
+{{- $fullname := include "umami.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-staff-setup
+  labels:
+    {{- include "umami.labels" . | nindent 4 }}
+data:
+  staff-setup.sh: |
+    #!/bin/sh
+    set -e
+
+    # Provision the read-only staff identity the login bridge signs people in as.
+    #
+    # WHY A TEAM IS NOT OPTIONAL
+    #
+    # Umami's view permission resolves ownership in order (src/permissions/website.ts):
+    #
+    #   if (entity.userId) return user.id === entity.userId;
+    #   if (entity.teamId) return isMemberOf(entity.teamId);
+    #
+    # A site created by the admin account carries userId = admin, so the teamId
+    # branch is NEVER REACHED for it. Adding a user to a team alongside such a
+    # site grants nothing at all. The sites have to be genuinely TRANSFERRED,
+    # which is what step 4 does.
+    #
+    # And the global `view-only` role grants no read access either --
+    # ROLE_PERMISSIONS['view-only'] is the empty list; it only removes write
+    # permissions. Team membership is the entire source of this account's
+    # visibility. Both halves are required.
+    #
+    # Idempotent throughout: safe on every pod start, which is when it runs.
+
+    echo "=== Umami staff access setup ==="
+    echo "Umami URL: ${UMAMI_URL}"
+    echo "Account:   ${STAFF_USER} (role: ${STAFF_ROLE})"
+
+    # -- Step 0: wait for Umami ------------------------------------------
+    ELAPSED=0
+    echo "Waiting for Umami to become ready..."
+    until curl -sf "${UMAMI_URL}/api/heartbeat" > /dev/null 2>&1; do
+      if [ "${ELAPSED}" -ge "${TIMEOUT}" ]; then
+        echo "WARNING: Umami not reachable after ${TIMEOUT}s."
+        # Same posture as the website-provisioning container: analytics must
+        # never be the reason a pod will not start. The bridge simply fails to
+        # sign anyone in until a later run succeeds.
+        [ "${FAIL_ON_ERROR}" = "true" ] && exit 1
+        echo "Continuing without staff setup."
+        exit 0
+      fi
+      sleep 5
+      ELAPSED=$((ELAPSED + 5))
+      echo "Umami not ready yet... (${ELAPSED}s/${TIMEOUT}s)"
+    done
+    echo "Umami is ready."
+
+    # -- Step 1: admin token ---------------------------------------------
+    LOGIN=$(curl -sf -X POST "${UMAMI_URL}/api/auth/login" \
+      -H "Content-Type: application/json" \
+      -d "{\"username\":\"${UMAMI_ADMIN_USER}\",\"password\":\"${UMAMI_ADMIN_PASSWORD}\"}") || {
+      echo "ERROR: admin login failed."
+      [ "${FAIL_ON_ERROR}" = "true" ] && exit 1
+      exit 0
+    }
+
+    TOKEN=$(echo "${LOGIN}" | sed 's/.*"token"[ ]*:[ ]*"\([^"]*\)".*/\1/')
+    if [ -z "${TOKEN}" ] || [ "${TOKEN}" = "${LOGIN}" ]; then
+      echo "ERROR: could not parse admin token."
+      [ "${FAIL_ON_ERROR}" = "true" ] && exit 1
+      exit 0
+    fi
+    echo "Admin token obtained."
+
+    AUTH="Authorization: Bearer ${TOKEN}"
+
+    # -- JSON parsing --------------------------------------------------
+    # via node, not sed. These responses are NESTED -- a team carries a
+    # `members[]` array whose rows have their own `id`, and a website list
+    # embeds its owning `user`. A greedy `sed 's/.*"id":"\([^"]*\)".*/\1/'`
+    # takes the LAST match on the line, so it silently returns a membership-row
+    # id where a team id was wanted, and a user id where a website id was.
+    # Both were observed on k3d: the script reported success, created a second
+    # team on every run, and tried to "adopt" the admin user as a website.
+    #
+    # node is already in this image (it IS the umami image), so there is no new
+    # dependency and no jq to vendor.
+    jsonpath() {
+      node -e '
+        let raw = "";
+        process.stdin.on("data", d => raw += d);
+        process.stdin.on("end", () => {
+          try {
+            const parsed = JSON.parse(raw);
+            const rows = Array.isArray(parsed) ? parsed : (parsed.data || []);
+            const [mode, arg] = process.argv.slice(1);
+            if (mode === "teamIdByName") {
+              const hit = rows.find(t => t.name === arg);
+              process.stdout.write(hit ? hit.id : "");
+            } else if (mode === "ownIds") {
+              // Top-level ids only. Never descends into nested objects.
+              process.stdout.write(rows.map(r => r.id).filter(Boolean).join("\n"));
+            } else if (mode === "role") {
+              process.stdout.write(parsed && parsed.role ? parsed.role : "");
+            } else if (mode === "hasUser") {
+              process.stdout.write(rows.some(r => r.userId === arg || (r.user && r.user.id === arg)) ? "yes" : "");
+            } else if (mode === "id") {
+              process.stdout.write(parsed && parsed.id ? parsed.id : "");
+            } else if (mode === "present") {
+              process.stdout.write(parsed && parsed.id ? "yes" : "");
+            }
+          } catch (e) {
+            process.stdout.write("");
+          }
+        });
+      ' "$1" "$2"
+    }
+
+    # -- Step 2: the read-only account -----------------------------------
+    # POST /api/users accepts an optional `id`, so this one is deterministic
+    # (computed by the chart from the release).
+    #
+    # A missing user comes back as the literal `null` WITH a 200, exactly like
+    # a missing website does -- so the status code alone reports every account
+    # as already present and creates nothing. Observed on k3d against an
+    # instance whose only user was `admin`.
+    USER_PRESENT=$(curl -s "${UMAMI_URL}/api/users/${STAFF_ID}" -H "${AUTH}" | jsonpath present)
+
+    if [ -n "${USER_PRESENT}" ]; then
+      # Reconcile the role rather than assuming it. This script is desired-state
+      # and runs on every deploy, so an account created under an earlier value
+      # of staffSetup.role must be corrected -- otherwise changing that value in
+      # config appears to work and silently does nothing. Caught exactly that
+      # way on k3d: the account stayed view-only after the value moved to admin.
+      # Reconcile role AND password on every run, unconditionally.
+      #
+      # The password matters more than it looks. It lives in the platform
+      # secret, and the bridge authenticates to Umami with it. Rotating that
+      # secret without also updating the Umami account would leave the bridge
+      # holding a password the account no longer has -- so the dashboard breaks
+      # on the next login, with nothing in the logs pointing at a vault edit as
+      # the cause. Sending it every time makes rotation a single vault change.
+      #
+      # Umami ignores a password field that already matches, so re-sending the
+      # same value on every deploy is free.
+      CURRENT_ROLE=$(curl -s "${UMAMI_URL}/api/users/${STAFF_ID}" -H "${AUTH}" | jsonpath role)
+      [ "${CURRENT_ROLE}" = "${STAFF_ROLE}" ] \
+        && echo "Account exists with role ${STAFF_ROLE}; reconciling password." \
+        || echo "Account exists with role ${CURRENT_ROLE:-unknown}; updating to ${STAFF_ROLE}."
+      curl -sf -X POST "${UMAMI_URL}/api/users/${STAFF_ID}" \
+        -H "${AUTH}" -H "Content-Type: application/json" \
+        -d "{\"username\":\"${STAFF_USER}\",\"role\":\"${STAFF_ROLE}\",\"password\":\"${STAFF_PASSWORD}\"}" \
+        > /dev/null && echo "Account reconciled." || echo "WARNING: account update failed."
+    else
+      echo "Creating staff account (role: ${STAFF_ROLE})..."
+      # Role comes from values. Default is `admin`, so a platform admin signing
+      # in through the bridge can save reports, organise boards and manage
+      # teams -- Umami has no role granting those while withholding site
+      # deletion, since every role above "nothing" carries websiteDelete.
+      # Deletion is blocked at the bridge instead.
+      curl -sf -X POST "${UMAMI_URL}/api/users" \
+        -H "${AUTH}" -H "Content-Type: application/json" \
+        -d "{\"id\":\"${STAFF_ID}\",\"username\":\"${STAFF_USER}\",\"password\":\"${STAFF_PASSWORD}\",\"role\":\"${STAFF_ROLE}\"}" \
+        > /dev/null && echo "Created." || echo "WARNING: create failed."
+    fi
+
+    # -- Step 3 & 4: team, membership, site adoption ---------------------
+    #
+    # ONLY for a non-admin account. Umami resolves canViewWebsite as
+    # `if (user.isAdmin) return true` before it looks at ownership at all, so
+    # an admin account already sees every site and needs no team and no
+    # transfer. Skipping them here also skips the riskiest operation this
+    # script can perform -- reassigning site ownership -- which is worth
+    # avoiding whenever it buys nothing.
+    if [ "${STAFF_ROLE}" = "admin" ]; then
+      echo "Account is admin -- team and site adoption not required."
+      echo "=== Umami staff access setup complete ==="
+      exit 0
+    fi
+
+    # -- The team, and membership ----------------------------------------
+    # POST /api/teams generates its own uuid and takes no `id`, so the team is
+    # found by name rather than addressed directly.
+    TEAM_ID=$(curl -sf "${UMAMI_URL}/api/teams?pageSize=200" -H "${AUTH}" | jsonpath teamIdByName "${TEAM_NAME}")
+
+    if [ -z "${TEAM_ID}" ]; then
+      echo "Creating team '${TEAM_NAME}'..."
+      TEAM_ID=$(curl -sf -X POST "${UMAMI_URL}/api/teams" \
+        -H "${AUTH}" -H "Content-Type: application/json" \
+        -d "{\"name\":\"${TEAM_NAME}\"}" | jsonpath id)
+    fi
+
+    if [ -z "${TEAM_ID}" ]; then
+      echo "ERROR: no team id resolved."
+      [ "${FAIL_ON_ERROR}" = "true" ] && exit 1
+      exit 0
+    fi
+    echo "Team id: ${TEAM_ID}"
+
+    # Membership is CHECKED before adding, not attempted-and-ignored.
+    # Umami does not reject a duplicate add -- it inserts a second team_user
+    # row -- so "try and swallow the error" silently grows one row per run
+    # forever. Observed on k3d: two rows after two runs.
+    ALREADY=$(curl -sf "${UMAMI_URL}/api/teams/${TEAM_ID}/users?pageSize=200" -H "${AUTH}" \
+      | jsonpath hasUser "${STAFF_ID}")
+
+    if [ -n "${ALREADY}" ]; then
+      echo "Account already in team."
+    else
+      curl -sf -X POST "${UMAMI_URL}/api/teams/${TEAM_ID}/users" \
+        -H "${AUTH}" -H "Content-Type: application/json" \
+        -d "{\"userId\":\"${STAFF_ID}\",\"role\":\"team-view-only\"}" \
+        > /dev/null && echo "Added account to team." || echo "WARNING: could not add account to team."
+    fi
+
+    # -- Adopt the app sites ---------------------------------------------
+    # GET /api/websites returns only the sites the CALLER owns, so this lists
+    # exactly the ones each app's provisioning container created as admin and
+    # that therefore still resolve on canViewWebsite's userId branch. Once
+    # transferred they drop out of this list, which makes re-running a no-op.
+    if [ "${ADOPT_WEBSITES}" = "true" ]; then
+      IDS=$(curl -sf "${UMAMI_URL}/api/websites?pageSize=200" -H "${AUTH}" | jsonpath ownIds)
+
+      if [ -z "${IDS}" ]; then
+        echo "No admin-owned sites to adopt."
+      else
+        for SITE in ${IDS}; do
+          curl -sf -X POST "${UMAMI_URL}/api/websites/${SITE}/transfer" \
+            -H "${AUTH}" -H "Content-Type: application/json" \
+            -d "{\"teamId\":\"${TEAM_ID}\"}" \
+            > /dev/null 2>&1 && echo "Adopted site ${SITE}." || echo "WARNING: could not adopt ${SITE}."
+        done
+      fi
+    fi
+
+    echo "=== Umami staff access setup complete ==="
+    exit 0
+{{- end }}
