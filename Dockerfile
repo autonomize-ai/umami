@@ -110,6 +110,13 @@ COPY --from=builder /app/generated ./generated
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# Login bridge — a second entry point into the SAME image, run as a sidecar
+# with `node bridge/server.mjs` instead of the default CMD. Deliberately not a
+# separate image: it is ~200 lines of dependency-free Node, and a second image
+# would mean a second build, a second tag to keep in step with this one, and a
+# second thing for image scanning to clear.
+COPY --chown=nextjs:nodejs bridge ./bridge
+
 USER nextjs
 
 EXPOSE 3000

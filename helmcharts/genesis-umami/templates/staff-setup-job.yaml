@@ -1,0 +1,174 @@
+{{- if and .Values.enabled .Values.staffSetup.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "umami.fullname" . }}-staff-setup
+  labels:
+    {{- include "umami.labels" . | nindent 4 }}
+    app.kubernetes.io/component: staff-setup
+  annotations:
+    # A HOOK JOB, not an init container on the Deployment.
+    #
+    # This work has to talk to a RUNNING Umami: it calls the admin API to
+    # create the team and the read-only account. An init container on Umami's
+    # own pod cannot do that -- it blocks the app container it needs to reach,
+    # and on a first install the Service has no endpoints at all, so it would
+    # wait out its timeout and provision nothing until someone restarted the
+    # pod. post-install/post-upgrade runs it once Umami is actually serving.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    # Kept on failure so the logs survive for diagnosis; the next upgrade
+    # replaces it. before-hook-creation clears the previous run's Job, whose
+    # spec is immutable and would otherwise make the upgrade fail.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- if .Values.staffSetup.argocdHook }}
+    # ArgoCD ignores helm.sh hooks and reads its own annotations. Both are set
+    # so the same chart provisions correctly under Helm and under ArgoCD --
+    # dev is continuously synced by ArgoCD, which is the path that matters here.
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    {{- end }}
+spec:
+  # The script is idempotent and exits 0 on a reachability timeout, so a retry
+  # only helps when the API genuinely erred. Two is enough to ride out a pod
+  # that was still warming up.
+  backoffLimit: 2
+  ttlSecondsAfterFinished: {{ .Values.staffSetup.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "umami.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: staff-setup
+    spec:
+      restartPolicy: Never
+      {{- with (include "umami.imagePullSecrets" . | trim) }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- with (include "umami.serviceAccountName" .) }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.keycloak.setup.enabled }}
+      initContainers:
+        # Provisions the Keycloak client the GATEWAY uses for this dashboard's
+        # route. Runs here rather than as its own Job because it shares this
+        # one's timing exactly -- post-install/post-upgrade, once per deploy --
+        # and an init container gives the ordering for free.
+        #
+        # Nothing in Umami depends on it; it is the gateway that breaks without
+        # the client. Grouped here because this Job already owns "everything
+        # this dashboard needs provisioned around it".
+        - name: keycloak-client-setup
+          {{- /* `dig` rather than a direct path: .Values.global is nil when this
+                 chart renders standalone, and a bare .Values.global.initImage
+                 fails the whole template with a nil-pointer error. Same
+                 accessor umami.imageRegistry already uses. */}}
+          image: {{ dig "initImage" (printf "%s/curl:8.5.0" (include "umami.imageRegistry" .)) (.Values.global | default dict) }}
+          command: ["sh", "/scripts/keycloak-setup.sh"]
+          env:
+            - name: KC_URL
+              value: {{ .Values.keycloak.setup.url | quote }}
+            - name: KC_REALM
+              value: {{ .Values.keycloak.setup.realm | quote }}
+            - name: CLIENT_ID
+              value: {{ .Values.keycloak.setup.clientId | quote }}
+            - name: REDIRECT_URI
+              value: {{ .Values.keycloak.setup.redirectUri | quote }}
+            - name: WEB_ORIGIN
+              value: {{ .Values.keycloak.setup.webOrigin | quote }}
+            - name: TIMEOUT
+              value: {{ .Values.keycloak.setup.timeout | default 120 | quote }}
+            - name: FAIL_ON_ERROR
+              value: {{ .Values.keycloak.setup.failOnError | default false | quote }}
+            - name: KC_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.staffSecretName" . }}
+                  key: {{ .Values.keycloak.setup.adminUserSecretKey | quote }}
+                  optional: true
+            - name: KC_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.staffSecretName" . }}
+                  key: {{ .Values.keycloak.setup.adminPasswordSecretKey | quote }}
+                  optional: true
+            - name: CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.staffSecretName" . }}
+                  key: {{ .Values.keycloak.setup.clientSecretKey | quote }}
+                  optional: true
+          volumeMounts:
+            - name: keycloak-setup-script
+              mountPath: /scripts
+          resources:
+            {{- toYaml .Values.staffSetup.resources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: staff-setup
+          image: {{ include "umami.image" (dict "img" .Values.image "registry" (include "umami.imageRegistry" .)) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["sh", "/scripts/staff-setup.sh"]
+          env:
+            # The Service, not loopback: this Job runs in its own pod.
+            - name: UMAMI_URL
+              value: {{ printf "http://%s:%v%s" (include "umami.fullname" .) .Values.service.port (trimSuffix "/" .Values.basePath) | quote }}
+            - name: TEAM_NAME
+              value: {{ .Values.staffSetup.teamName | quote }}
+            - name: STAFF_USER
+              value: {{ .Values.staffSetup.username | quote }}
+            - name: STAFF_ROLE
+              value: {{ .Values.staffSetup.role | quote }}
+            - name: STAFF_ID
+              value: {{ include "umami.staffUserId" . | quote }}
+            - name: TIMEOUT
+              value: {{ .Values.staffSetup.timeout | default 120 | quote }}
+            - name: FAIL_ON_ERROR
+              value: {{ .Values.staffSetup.failOnError | default false | quote }}
+            - name: ADOPT_WEBSITES
+              value: {{ .Values.staffSetup.adoptWebsites | default true | quote }}
+            - name: UMAMI_ADMIN_USER
+              value: {{ .Values.staffSetup.adminUser | quote }}
+            - name: UMAMI_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.staffSecretName" . }}
+                  key: {{ .Values.staffSetup.adminPasswordSecretKey | quote }}
+                  # optional so a missing key fails the Job with a readable log
+                  # line instead of wedging the pod in CreateContainerConfigError.
+                  optional: true
+            - name: STAFF_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.staffSecretName" . }}
+                  key: {{ .Values.staffSetup.passwordSecretKey | quote }}
+                  optional: true
+          volumeMounts:
+            - name: staff-setup-script
+              mountPath: /scripts
+          resources:
+            {{- toYaml .Values.staffSetup.resources | nindent 12 }}
+      volumes:
+        - name: staff-setup-script
+          configMap:
+            name: {{ include "umami.fullname" . }}-staff-setup
+            defaultMode: 0555
+        {{- if .Values.keycloak.setup.enabled }}
+        - name: keycloak-setup-script
+          configMap:
+            name: {{ include "umami.fullname" . }}-keycloak-setup
+            defaultMode: 0555
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -12,6 +12,15 @@ spec:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+    {{- if .Values.bridge.enabled }}
+    # The port the gateway actually routes to. `http` stays exposed for
+    # in-cluster callers that must bypass the bridge -- notably each app's
+    # website-provisioning container, which needs Umami's admin API and has
+    # no browser identity for the bridge to act on.
+    - name: bridge
+      port: {{ .Values.bridge.port }}
+      targetPort: bridge
+    {{- end }}
   selector:
     {{- include "umami.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: umami

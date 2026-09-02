@@ -299,3 +299,45 @@ Usage: include "umami.databaseUrl" (dict "ctx" . "password" $pw)
 {{- required "database.external.url is required when database.bundled=false with password auth and no existingSecret is set" $ctx.Values.database.external.url -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Secret holding the credentials the staff-access containers need
+(UMAMI_ADMIN_PASSWORD, UMAMI_STAFF_PASSWORD).
+
+Defaults to the platform secret when one is configured for the app, so these
+sit beside APP_SECRET and rotate in the same place, rather than introducing a
+third Secret for two keys.
+*/}}
+{{- define "umami.staffSecretName" -}}
+{{- if .Values.staffSetup.existingSecret -}}
+{{- .Values.staffSetup.existingSecret -}}
+{{- else if .Values.app.existingSecret -}}
+{{- .Values.app.existingSecret -}}
+{{- else -}}
+{{- include "umami.fullname" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Umami user id for the shared staff account.
+
+CALCULATED, not stored -- the same reasoning as the website ids each app's
+chart derives. `uuidv4` would return a new value on every render, so every
+ArgoCD sync would create another account and orphan the last one; a `lookup`
+of what already exists is always empty under `helm template`, which is exactly
+how ArgoCD renders. A pure function of the release name survives both.
+
+Sliced into the 8-4-4-4-12 shape with the version ('4') and variant ('a')
+characters forced, because Umami validates the id strictly and rejects
+anything that merely looks uuid-shaped.
+
+Override staffSetup.userId to pin an exact value.
+*/}}
+{{- define "umami.staffUserId" -}}
+{{- if .Values.staffSetup.userId -}}
+{{- .Values.staffSetup.userId -}}
+{{- else -}}
+{{- $h := sha256sum (printf "%s/umami-staff" (include "umami.fullname" .)) -}}
+{{- printf "%s-%s-4%s-a%s-%s" (substr 0 8 $h) (substr 8 12 $h) (substr 13 16 $h) (substr 17 20 $h) (substr 20 32 $h) -}}
+{{- end -}}
+{{- end -}}

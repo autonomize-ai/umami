@@ -1,0 +1,134 @@
+{{- if and .Values.enabled .Values.keycloak.setup.enabled }}
+{{- $fullname := include "umami.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-keycloak-setup
+  labels:
+    {{- include "umami.labels" . | nindent 4 }}
+data:
+  keycloak-setup.sh: |
+    #!/bin/sh
+    set -e
+
+    # Provision the Keycloak client the GATEWAY uses to sign a browser in
+    # before it reaches this dashboard.
+    #
+    # WHY THIS EXISTS AT ALL
+    #
+    # The gateway's openid-connect route cannot start a login without a
+    # client_id, so some client has to exist. Reusing an app's existing client
+    # (ai-studio-frontend, whose wildcard redirect URI would already match)
+    # would work and save a secret, but it puts THAT app's client secret into
+    # the gateway's environment -- so a gateway compromise leaks the main
+    # product's login credential -- and it makes analytics access depend on
+    # another team's client config, where narrowing those wildcard redirect
+    # URIs is a sensible hardening someone will eventually do.
+    #
+    # WHY IT IS A SCRIPT AND NOT A TICKET
+    #
+    # The platform's rule is that Keycloak clients are never created by hand:
+    # a hand-made client exists in one environment, is absent from staging and
+    # prod, and does not survive a realm rebuild. genesis-fe provisions its own
+    # the same way. This chart deliberately carries no genesis-lib dependency
+    # (it ships as a standalone bundle), so it repeats the ~60 lines rather
+    # than taking the dependency.
+    #
+    # Idempotent: creates the client, or updates it in place if it exists.
+
+    echo "=== Keycloak client setup for the Umami dashboard ==="
+    echo "Keycloak: ${KC_URL}"
+    echo "Realm:    ${KC_REALM}"
+    echo "Client:   ${CLIENT_ID}"
+
+    # -- Step 0: wait for Keycloak ---------------------------------------
+    ELAPSED=0
+    until curl -sf "${KC_URL}/realms/${KC_REALM}/.well-known/openid-configuration" > /dev/null 2>&1; do
+      if [ "${ELAPSED}" -ge "${TIMEOUT}" ]; then
+        echo "WARNING: Keycloak not reachable after ${TIMEOUT}s."
+        [ "${FAIL_ON_ERROR}" = "true" ] && exit 1
+        echo "Continuing without client setup; the dashboard route will 500 until a later run succeeds."
+        exit 0
+      fi
+      sleep 5
+      ELAPSED=$((ELAPSED + 5))
+      echo "Keycloak not ready yet... (${ELAPSED}s/${TIMEOUT}s)"
+    done
+    echo "Keycloak is ready."
+
+    # -- Step 1: admin token ---------------------------------------------
+    TOKEN_RESPONSE=$(curl -sf -X POST \
+      "${KC_URL}/realms/master/protocol/openid-connect/token" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "grant_type=password" \
+      -d "client_id=admin-cli" \
+      -d "username=${KC_ADMIN_USER}" \
+      -d "password=${KC_ADMIN_PASSWORD}") || {
+      echo "ERROR: could not obtain a Keycloak admin token."
+      [ "${FAIL_ON_ERROR}" = "true" ] && exit 1
+      exit 0
+    }
+
+    ACCESS_TOKEN=$(echo "${TOKEN_RESPONSE}" | sed 's/.*"access_token"[ ]*:[ ]*"\([^"]*\)".*/\1/')
+    if [ -z "${ACCESS_TOKEN}" ] || [ "${ACCESS_TOKEN}" = "${TOKEN_RESPONSE}" ]; then
+      echo "ERROR: could not parse the admin token."
+      [ "${FAIL_ON_ERROR}" = "true" ] && exit 1
+      exit 0
+    fi
+    echo "Admin token obtained."
+
+    AUTH="Authorization: Bearer ${ACCESS_TOKEN}"
+
+    # -- Step 2: build the client definition -----------------------------
+    #
+    # consentRequired is pinned FALSE deliberately. With it on, Keycloak shows
+    # an "allow access?" screen on first visit even when the user already has a
+    # live session -- which silently breaks the single-sign-on experience this
+    # whole route exists to provide. It is Keycloak's default, but a
+    # hand-edited client can pick it up by accident, so it is stated here.
+    #
+    # The secret is PINNED from the platform secret rather than left for
+    # Keycloak to generate. Generated means reading it back out and getting it
+    # into the gateway's environment somehow; pinned means realm and gateway
+    # cannot drift, and rotation is one vault edit.
+    CLIENT_JSON=$(cat <<ENDJSON
+    {
+      "clientId": "${CLIENT_ID}",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${CLIENT_SECRET}",
+      "protocol": "openid-connect",
+      "consentRequired": false,
+      "redirectUris": ["${REDIRECT_URI}"],
+      "webOrigins": ["${WEB_ORIGIN}"]
+    }
+    ENDJSON
+    )
+
+    # -- Step 3: create, or update in place ------------------------------
+    EXISTING=$(curl -sf "${KC_URL}/admin/realms/${KC_REALM}/clients?clientId=${CLIENT_ID}" -H "${AUTH}" || echo "")
+    UUID=$(echo "${EXISTING}" | sed -n 's/.*"id"[ ]*:[ ]*"\([0-9a-f-]*\)".*/\1/p' | head -1)
+
+    if [ -n "${UUID}" ]; then
+      echo "Client exists. Updating in place..."
+      curl -sf -X PUT "${KC_URL}/admin/realms/${KC_REALM}/clients/${UUID}" \
+        -H "${AUTH}" -H "Content-Type: application/json" \
+        -d "${CLIENT_JSON}" > /dev/null \
+        && echo "Client updated." \
+        || { echo "ERROR: client update failed."; [ "${FAIL_ON_ERROR}" = "true" ] && exit 1; }
+    else
+      echo "Client not found. Creating..."
+      curl -sf -X POST "${KC_URL}/admin/realms/${KC_REALM}/clients" \
+        -H "${AUTH}" -H "Content-Type: application/json" \
+        -d "${CLIENT_JSON}" > /dev/null \
+        && echo "Client created." \
+        || { echo "ERROR: client creation failed."; [ "${FAIL_ON_ERROR}" = "true" ] && exit 1; }
+    fi
+
+    echo "=== Keycloak client setup complete ==="
+    exit 0
+{{- end }}

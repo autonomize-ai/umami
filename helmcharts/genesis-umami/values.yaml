@@ -206,6 +206,217 @@ service:
   type: ClusterIP
   port: 3000
 
+# ---- Path prefix -------------------------------------------------------------
+# Where this app is served. MUST match the BASE_PATH the image was BUILT with
+# (.azure-pipelines/umami-cicd.yaml) and the prefix the gateway route uses.
+#
+# This value does not configure the app -- it cannot. Next.js applies basePath
+# at build time and the runtime stage of the Dockerfile does not carry the
+# variable, so setting it here would silently do nothing. It exists so the
+# chart's own health probes, internal URLs and the bridge agree with whatever
+# the image was built for. Change the pipeline and this together, or the pod
+# fails its readiness probe on a path the app no longer serves.
+basePath: "/umami"
+
+# ---- Redis ------------------------------------------------------------------
+# REQUIRED for staff dashboard access, not an optimisation.
+#
+# The login bridge hands the browser a token from Umami's /api/auth/sso, which
+# is the only endpoint that mints an EXPIRING one (saveAuth(..., 86400) -- 24h).
+# /api/auth/login passes no expiry at all, so its token lives until APP_SECRET
+# rotates. And /api/auth/sso returns 500 "Redis is disabled" without REDIS_URL.
+#
+# So with this off: either the bridge cannot sign anyone in, or every staff
+# browser holds a permanent Umami session. Leave it on wherever bridge.enabled.
+#
+# The URL is COMPOSED from the parts below plus the password from the platform
+# secret, rather than taking a whole connection string -- that password already
+# exists there for every other Redis client, and a second copy of it embedded in
+# a URL is one more thing to rotate in lockstep.
+redis:
+  enabled: false
+  host: "genesis-redis"
+  port: 6379
+  # node-redis takes user:password. Redis AUTH without an ACL user wants the
+  # password only, which is an empty username here.
+  username: ""
+  tls: true
+  # Secret holding the password. Defaults to the same one the staff credentials
+  # come from (the platform secret, where REDIS_PASSWORD already lives).
+  existingSecret: ""
+  passwordSecretKey: "REDIS_PASSWORD"
+  caCert:
+    # Secret holding `ca.crt` for a privately-issued Redis certificate, mounted
+    # and exported as NODE_EXTRA_CA_CERTS. Required whenever tls is true and the
+    # server's CA is not a public one -- node-redis verifies against Node's
+    # default trust store and will otherwise fail the handshake outright.
+    # Leave empty for a publicly-trusted certificate.
+    secretName: ""
+
+# ---- Staff access ------------------------------------------------------------
+# Umami has no SSO, and its only account out of the box is `admin`, which can
+# delete websites and reset their data (ROLE_PERMISSIONS.admin = ["all"]).
+# Nobody should be reading a dashboard with that. This provisions a read-only
+# identity for the login bridge to sign staff in as.
+#
+# Two objects, and BOTH are required -- neither works alone:
+#   · a user with the global `view-only` role, which removes write permissions
+#     but grants no read access at all (ROLE_PERMISSIONS["view-only"] == [])
+#   · a team that OWNS the app websites, which is where the read access
+#     actually comes from
+# The sites must be transferred, not merely associated: canViewWebsite checks
+# `entity.userId` first and returns before it ever looks at `entity.teamId`,
+# so an admin-owned site is invisible to team members.
+# Default OFF. This chart reaches an environment through a pinned version in
+# genesis-v3-charts, so a routine version bump must not switch a feature on by
+# itself: an environment that wants only event collection keeps getting only
+# event collection, and the dashboard turns on when its values say so.
+staffSetup:
+  enabled: false
+  # Display name of the team. Looked up by name because POST /api/teams mints
+  # its own uuid and accepts no id.
+  teamName: "Genesis Staff"
+  username: "genesis-platform-staff"
+  # Umami role for that account.
+  #
+  # `admin` by default, so a platform admin arriving through the bridge can do
+  # real work: save funnels and retention reports, organise boards, manage
+  # teams. Umami offers no role that permits those while withholding site
+  # deletion -- every role above "nothing" carries websiteDelete -- so the two
+  # destructive calls are blocked at the bridge instead (bridge.blockedCalls).
+  #
+  # Set to `view-only` for a strictly read-only posture. That account sees
+  # nothing on its own, so the team and site-adoption steps below become
+  # necessary; with `admin` they are skipped entirely.
+  role: "admin"
+  # Pin an exact Umami user id. Leave EMPTY -- it is derived from the release
+  # name (see umami.staffUserId) so it is stable across renders.
+  userId: ""
+  # Adopt every admin-owned website into the team on each run. GET /api/websites
+  # returns only what the caller owns, so this picks up exactly the sites each
+  # app's provisioning container created and nothing else; once transferred they
+  # leave that list, which is what makes re-running a no-op.
+  adoptWebsites: true
+  adminUser: "admin"
+  # Defaults to app.existingSecret so these sit beside APP_SECRET rather than
+  # adding a third Secret for two keys.
+  existingSecret: ""
+  adminPasswordSecretKey: "UMAMI_ADMIN_PASSWORD"
+  passwordSecretKey: "UMAMI_STAFF_PASSWORD"
+  timeout: 120
+  # Also emit ArgoCD's PostSync annotations. ArgoCD does not read helm.sh hooks,
+  # and dev is continuously synced by ArgoCD, so without this the Job would be
+  # treated as an ordinary resource there and never re-run after the first sync.
+  argocdHook: true
+  ttlSecondsAfterFinished: 600
+  # false on purpose: analytics must never be the reason a pod will not start.
+  # A failed run leaves the bridge unable to sign anyone in until a later
+  # restart succeeds; it does not take Umami down.
+  failOnError: false
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+# ---- Keycloak client --------------------------------------------------------
+# The client the GATEWAY uses to sign a browser in before it reaches this
+# dashboard. Provisioned here, never by hand: a hand-made client exists in one
+# environment, is missing from staging and prod, and does not survive a realm
+# rebuild. Same posture as genesis-fe, which provisions its own.
+#
+# Nothing in Umami consumes this. It lives in this chart because the dashboard
+# route is what needs it, and this chart already owns everything provisioned
+# around that route.
+# Default OFF. This chart reaches an environment through a pinned version in
+# genesis-v3-charts, so a routine version bump must not switch a feature on by
+# itself: an environment that wants only event collection keeps getting only
+# event collection, and the dashboard turns on when its values say so.
+keycloak:
+  setup:
+    enabled: false
+    # In-cluster Keycloak address. The admin API is not published at the edge.
+    url: "http://genesis-idp:8080/auth"
+    realm: "autonomize"
+    clientId: "genesis-umami-dashboard"
+    # Must match the gateway route's openid-connect redirect_uri exactly.
+    redirectUri: ""
+    webOrigin: ""
+    # Keys in the platform secret. The client secret is PINNED from there
+    # rather than generated by Keycloak, so realm and gateway cannot drift and
+    # rotation is a single vault edit.
+    adminUserSecretKey: "KC_BOOTSTRAP_ADMIN_USERNAME"
+    adminPasswordSecretKey: "KC_BOOTSTRAP_ADMIN_PASSWORD"
+    clientSecretKey: "UMAMI_OIDC_CLIENT_SECRET"
+    timeout: 120
+    # false: a Keycloak blip must not fail the deploy. The next run fixes it;
+    # until then the dashboard route cannot complete a login.
+    failOnError: false
+
+# ---- Login bridge ------------------------------------------------------------
+# The container the gateway routes to. On the bare entry path it mints a
+# short-lived Umami session for the read-only account above and redirects to
+# Umami's own /sso page; every other path it proxies through untouched.
+#
+# It is NOT a security boundary -- it trusts the gateway, which is the only way
+# to reach it. The platform-admin check happens there, in auth-verify.lua. The
+# requiredRole below is defence in depth against a misconfigured route.
+#
+# Runs from this same image with a different command, so it adds no second
+# image to build, tag, or scan.
+# Default OFF. This chart reaches an environment through a pinned version in
+# genesis-v3-charts, so a routine version bump must not switch a feature on by
+# itself: an environment that wants only event collection keeps getting only
+# event collection, and the dashboard turns on when its values say so.
+bridge:
+  enabled: false
+  port: 3001
+  # Must match `requiredRoles` on the gateway's dashboard route.
+  requiredRole: "platform-admin"
+  # Declare this app's paths to genesis-authz at startup.
+  #
+  # That service default-denies any URI it does not recognise, so without this
+  # every /umami request 403s before the gateway's role gate is even consulted.
+  #
+  # Registered from here rather than hardcoded into genesis-authz, per its own
+  # contract: a service sends its full route list on every boot and the table
+  # converges. Umami is third-party and cannot make the call, so the bridge
+  # does it. Registration is idempotent, so replicas racing is harmless.
+  routeRegistration:
+    enabled: true
+    url: "http://genesis-authz:8000"
+    serviceName: "umami"
+    # One row per path depth. authz's pattern compiler anchors every pattern
+    # and its widest param type matches a single segment, so a subtree cannot
+    # be expressed as one row. Umami's own routes reach six segments below the
+    # prefix; nine leaves room for an upstream release to add two more.
+    maxDepth: 9
+    internalKeySecretKey: "GENESIS_API_KEY"
+  # Calls refused outright, whatever the Umami account's role.
+  #
+  # The account is a Umami admin so staff can actually work in the tool. These
+  # two are the exception, and deletion is the one that really matters: the
+  # site id is what the tracker posts events to, and it is DERIVED from the
+  # environment host plus chart name rather than stored -- so a deleted site is
+  # recreated empty under the SAME id on the next deploy. Ingestion silently
+  # resumes into a blank site, the dashboard still loads, and history is gone
+  # with no error and nothing to restore.
+  #
+  # Reset is included for the same data-loss reason, though it leaves ingestion
+  # intact. Drop it from this list if staff need it.
+  #
+  # Format: "METHOD:<regex against Umami's own path>". Set to [] to disable.
+  blockedCalls:
+    - "DELETE:^/api/websites/[^/]+/?$"
+    - "POST:^/api/websites/[^/]+/reset/?$"
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 128Mi
+
 ingress:
   enabled: false
   className: ""
