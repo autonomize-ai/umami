@@ -267,8 +267,12 @@ redis:
 # The sites must be transferred, not merely associated: canViewWebsite checks
 # `entity.userId` first and returns before it ever looks at `entity.teamId`,
 # so an admin-owned site is invisible to team members.
+# Default OFF. This chart reaches an environment through a pinned version in
+# genesis-v3-charts, so a routine version bump must not switch a feature on by
+# itself: an environment that wants only event collection keeps getting only
+# event collection, and the dashboard turns on when its values say so.
 staffSetup:
-  enabled: true
+  enabled: false
   # Display name of the team. Looked up by name because POST /api/teams mints
   # its own uuid and accepts no id.
   teamName: "Genesis Staff"
@@ -325,9 +329,13 @@ staffSetup:
 # Nothing in Umami consumes this. It lives in this chart because the dashboard
 # route is what needs it, and this chart already owns everything provisioned
 # around that route.
+# Default OFF. This chart reaches an environment through a pinned version in
+# genesis-v3-charts, so a routine version bump must not switch a feature on by
+# itself: an environment that wants only event collection keeps getting only
+# event collection, and the dashboard turns on when its values say so.
 keycloak:
   setup:
-    enabled: true
+    enabled: false
     # In-cluster Keycloak address. The admin API is not published at the edge.
     url: "http://genesis-idp:8080/auth"
     realm: "autonomize"
@@ -357,8 +365,12 @@ keycloak:
 #
 # Runs from this same image with a different command, so it adds no second
 # image to build, tag, or scan.
+# Default OFF. This chart reaches an environment through a pinned version in
+# genesis-v3-charts, so a routine version bump must not switch a feature on by
+# itself: an environment that wants only event collection keeps getting only
+# event collection, and the dashboard turns on when its values say so.
 bridge:
-  enabled: true
+  enabled: false
   port: 3001
   # Must match `requiredRoles` on the gateway's dashboard route.
   requiredRole: "platform-admin"
