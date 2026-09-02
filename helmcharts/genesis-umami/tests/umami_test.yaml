@@ -647,6 +647,7 @@ tests:
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
     template: templates/staff-setup-job.yaml
     asserts:
       - isKind:
@@ -666,6 +667,7 @@ tests:
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
     template: templates/staff-setup-job.yaml
     asserts:
       # Pin the name at this index too. The assertion below is positional, and
@@ -685,6 +687,7 @@ tests:
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
     template: templates/deployment.yaml
     asserts:
       - equal:
@@ -730,6 +733,8 @@ tests:
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
+      keycloak.setup.enabled: true
     template: templates/staff-setup-job.yaml
     asserts:
       - equal:
@@ -745,6 +750,7 @@ tests:
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
+      keycloak.setup.enabled: true
     template: templates/keycloak-setup-configmap.yaml
     asserts:
       # With consent on, Keycloak interrupts even an existing session with an
@@ -757,6 +763,7 @@ tests:
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
     template: templates/deployment.yaml
     asserts:
       # The account is a Umami admin so staff can actually work in the tool;
@@ -768,3 +775,40 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_BLOCKED_CALLS")].value
           pattern: "reset"
+
+  # This chart reaches an environment through a pinned version in the umbrella,
+  # so a routine version bump must not switch a feature on by itself. An
+  # environment that asked only for event collection keeps getting only event
+  # collection until its own values say otherwise.
+  #
+  # These three defaulted to true once, which meant the next pin bump would have
+  # started a login bridge, created a Keycloak client and provisioned a staff
+  # account on every environment running Umami. Turning any of them back on by
+  # default should fail here first.
+  - it: leaves the staff dashboard off unless an environment asks for it
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/staff-setup-job.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/keycloak-setup-configmap.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/staff-setup-configmap.yaml
+
+  - it: runs Umami alone when the dashboard is off, with no bridge sidecar
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/deployment.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].name
+          pattern: bridge
