@@ -119,5 +119,5 @@ await browser.close();
 if (EXPECT_ALLOWED && netErrors.length) failures.push(`${netErrors.length} failed request(s)`);
 if (EXPECT_ALLOWED && consoleErrors.length) failures.push(`${consoleErrors.length} console error(s)`);
 
-console.log(failures.length ? `  RESULT: FAIL\n${failures.map(f => '    - ' + f).join('\n')}` : '  RESULT: PASS');
+console.log(failures.length ? `  RESULT: FAIL\n${failures.map(f => `    - ${f}`).join('\n')}` : '  RESULT: PASS');
 process.exit(failures.length ? 1 : 0);

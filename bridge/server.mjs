@@ -75,10 +75,6 @@ const BLOCKED = (process.env.BRIDGE_BLOCKED_CALLS ||
     const [method, pattern] = entry.split(':');
     return { method: method.toUpperCase(), re: new RegExp(pattern) };
   });
-// Umami issues a 24h token via /api/auth/sso. Re-mint a little early so a
-// browser is never handed one that expires mid-session.
-const SSO_TOKEN_TTL_MS = 23 * 60 * 60 * 1000;
-
 /**
  * Where Umami is sent after the hand-off, and why it is NOT "/".
  *
