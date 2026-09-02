@@ -79,6 +79,38 @@ const BLOCKED = (process.env.BRIDGE_BLOCKED_CALLS ||
 // browser is never handed one that expires mid-session.
 const SSO_TOKEN_TTL_MS = 23 * 60 * 60 * 1000;
 
+/**
+ * Where Umami is sent after the hand-off, and why it is NOT "/".
+ *
+ * With basePath baked in, Umami's "/" IS /umami -- the same URL as this
+ * bridge's entry path. Sending the browser there after a successful hand-off
+ * put it straight back on the mint path, which minted again, redirected to
+ * /sso again, and looped forever. Landing on a real page instead means the
+ * hand-off can never return to the entry path.
+ *
+ * /websites is where Umami's own root page redirects anyway (src/app/page.tsx
+ * does router.replace('/websites')), so this skips a hop rather than changing
+ * the destination.
+ */
+const POST_SIGNIN_PATH = process.env.BRIDGE_POST_SIGNIN_PATH || '/websites';
+
+/**
+ * Short-lived marker that this browser was just handed a token.
+ *
+ * Belt to POST_SIGNIN_PATH's braces. Anything that lands back on the entry
+ * path -- Umami's own header logo links to "/", which is /umami -- would
+ * otherwise mint a fresh token on every click. While this cookie is present
+ * the entry path is proxied through instead, and Umami's root page does its
+ * own client-side redirect using the token already in localStorage.
+ *
+ * Deliberately ~2 minutes, not the token's 24h. It exists to break redirect
+ * loops, not to suppress legitimate re-minting: if someone clears localStorage
+ * an hour later, they must be able to hit /umami and get a working session
+ * rather than be proxied to a login page they cannot pass.
+ */
+const RECENT_MINT_COOKIE = 'umami_bridge_signin';
+const RECENT_MINT_TTL_S = 120;
+
 const log = (...args) => console.log('[bridge]', ...args);
 
 /**
@@ -265,6 +297,11 @@ function appPath(pathname) {
     : pathname;
 }
 
+function mintedRecently(req) {
+  const raw = req.headers.cookie || '';
+  return raw.split(';').some(c => c.trim().startsWith(`${RECENT_MINT_COOKIE}=`));
+}
+
 function isBlocked(method, pathname) {
   const p = appPath(pathname);
   return BLOCKED.some(b => b.method === (method || '').toUpperCase() && b.re.test(p));
@@ -322,7 +359,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (!isEntryPath(pathname)) {
+  // Proxy the entry path through when this browser was just handed a token.
+  // Without it, anything returning to /umami re-mints -- and before
+  // POST_SIGNIN_PATH existed, that was an infinite redirect loop.
+  if (!isEntryPath(pathname) || mintedRecently(req)) {
     proxy(req, res);
     return;
   }
@@ -340,12 +380,17 @@ const server = http.createServer(async (req, res) => {
     const token = await mintBrowserToken();
     // Umami's /sso page validates `url` against open redirects itself
     // (isSafeRedirectUrl: must start with a single slash, no scheme).
-    const target = `${BASE_PATH}/sso?token=${encodeURIComponent(token)}&url=${encodeURIComponent('/')}`;
+    const target =
+      `${BASE_PATH}/sso?token=${encodeURIComponent(token)}` +
+      `&url=${encodeURIComponent(POST_SIGNIN_PATH)}`;
     res.writeHead(302, {
       Location: target,
       // A URL carrying a session token must never be cached or revalidated.
       'Cache-Control': 'no-store, no-cache, must-revalidate',
       Pragma: 'no-cache',
+      'Set-Cookie':
+        `${RECENT_MINT_COOKIE}=1; Path=${BASE_PATH || '/'}; Max-Age=${RECENT_MINT_TTL_S}; ` +
+        'HttpOnly; SameSite=Lax',
     });
     res.end();
   } catch (err) {
