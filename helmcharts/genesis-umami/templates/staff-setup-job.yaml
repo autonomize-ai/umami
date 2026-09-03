@@ -64,8 +64,18 @@ spec:
           {{- /* `dig` rather than a direct path: .Values.global is nil when this
                  chart renders standalone, and a bare .Values.global.initImage
                  fails the whole template with a nil-pointer error. Same
-                 accessor umami.imageRegistry already uses. */}}
-          image: {{ dig "initImage" (printf "%s/curl:8.5.0" (include "umami.imageRegistry" .)) (.Values.global | default dict) }}
+                 accessor umami.imageRegistry already uses.
+
+                 The trailing `default` is load-bearing, not belt-and-braces.
+                 `dig` falls back only when the key is ABSENT; the umbrella
+                 ships `global.initImage: ""`, so the key is present and empty
+                 and dig hands back "". That rendered `image:` with no value,
+                 which the API server rejects outright --
+                 `spec.template.spec.initContainers[0].image: Required value` --
+                 so the Job could not be created on any environment that took
+                 the umbrella's default, and the Keycloak client the gateway's
+                 dashboard route needs was never provisioned. */}}
+          image: {{ dig "initImage" "" (.Values.global | default dict) | default (printf "%s/curl:8.5.0" (include "umami.imageRegistry" .)) }}
           command: ["sh", "/scripts/keycloak-setup.sh"]
           env:
             - name: KC_URL
