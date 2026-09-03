@@ -812,3 +812,36 @@ tests:
       - notMatchRegex:
           path: spec.template.spec.containers[0].name
           pattern: bridge
+
+  # The umbrella ships `global.initImage: ""` -- present, not absent. `dig`
+  # falls back only on an ABSENT key, so it returned "" and the Job rendered
+  # `image:` with no value. The API server rejects that outright
+  # (`initContainers[0].image: Required value`), so the Job could not be created
+  # at all and the Keycloak client the gateway's dashboard route depends on was
+  # never provisioned -- the route redirected to Keycloak, which answered
+  # "Client not found". Renders clean, fails only against a live cluster.
+  - it: falls back to the curl image when global.initImage is present but empty
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
+      keycloak.setup.enabled: true
+      global.initImage: ""
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: sprintregistry.azurecr.io/curl:8.5.0
+
+  - it: honours global.initImage when it actually carries a value
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
+      keycloak.setup.enabled: true
+      global.initImage: "myregistry.example.com/curl:9.9"
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: myregistry.example.com/curl:9.9
