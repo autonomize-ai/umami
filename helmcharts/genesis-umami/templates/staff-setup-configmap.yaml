@@ -166,14 +166,49 @@ data:
 
     # -- Step 3 & 4: team, membership, site adoption ---------------------
     #
-    # ONLY for a non-admin account. Umami resolves canViewWebsite as
-    # `if (user.isAdmin) return true` before it looks at ownership at all, so
-    # an admin account already sees every site and needs no team and no
-    # transfer. Skipping them here also skips the riskiest operation this
-    # script can perform -- reassigning site ownership -- which is worth
-    # avoiding whenever it buys nothing.
+    # An admin account needs NO team, but it does still need the sites moved
+    # onto it, and that distinction is easy to get wrong -- this script got it
+    # wrong and shipped an empty Websites page to dev.
+    #
+    # Umami applies isAdmin in two different places, and only one of them is
+    # a bypass:
+    #
+    #   permissions/website.ts  canViewWebsite()  -> `if (user.isAdmin) return true`
+    #   queries/prisma/website  getUserWebsites() -> `where: { userId }`, no role check
+    #
+    # So an admin can OPEN any site it knows the id of, but the Websites LIST
+    # is scoped to ownership for every role. The page calls
+    # /users/{id}/websites without `includeTeams` (WebsitesDataTable passes no
+    # params), so team membership does not put a site on that page either --
+    # only ownership does. An admin therefore lands on "No data available"
+    # while holding permission to view every one of them.
+    #
+    # Hence: admins skip the team and take the sites onto their own user id;
+    # non-admins keep the team, because ownership would hand a restricted role
+    # owner rights on the site.
     if [ "${STAFF_ROLE}" = "admin" ]; then
-      echo "Account is admin -- team and site adoption not required."
+      echo "Account is admin -- skipping team, adopting sites onto the account."
+
+      if [ "${ADOPT_WEBSITES}" = "true" ]; then
+        # Lists what the CALLER owns, i.e. the sites each app's provisioning
+        # container created as admin. Once transferred they leave this list,
+        # so re-running is a no-op.
+        IDS=$(curl -sf "${UMAMI_URL}/api/websites?pageSize=200" -H "${AUTH}" | jsonpath ownIds)
+
+        if [ -z "${IDS}" ]; then
+          echo "No admin-owned sites to adopt."
+        else
+          for SITE in ${IDS}; do
+            # userId, not teamId: the transfer endpoint sets teamId null and
+            # userId to this account, which is what getUserWebsites matches on.
+            curl -sf -X POST "${UMAMI_URL}/api/websites/${SITE}/transfer" \
+              -H "${AUTH}" -H "Content-Type: application/json" \
+              -d "{\"userId\":\"${STAFF_ID}\"}" \
+              > /dev/null 2>&1 && echo "Adopted site ${SITE}." || echo "WARNING: could not adopt ${SITE}."
+          done
+        fi
+      fi
+
       echo "=== Umami staff access setup complete ==="
       exit 0
     fi
