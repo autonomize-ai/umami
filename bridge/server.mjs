@@ -495,7 +495,17 @@ const server = http.createServer(async (req, res) => {
   // an app key the gateway has already validated -- there is no platform-admin
   // in this request to look for.
   if (isProvisionPath(pathname)) {
-    await handleProvision(req, res);
+    // Guarded at the dispatch point, not only inside the handler. This
+    // callback is async, so anything that escapes it becomes an unhandled
+    // rejection -- and Node exits the process on those. A client that hangs up
+    // mid-write would take the sidecar down with it, and this sidecar shares a
+    // pod with Umami itself.
+    try {
+      await handleProvision(req, res);
+    } catch (err) {
+      log('provision handler failed unexpectedly --', err.message);
+      if (!res.headersSent) deny(res, 502, 'Could not provision the analytics site.');
+    }
     return;
   }
 
