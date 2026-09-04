@@ -399,7 +399,14 @@ async function handleProvision(req, res) {
   let payload;
   try {
     payload = JSON.parse(await readBody(req));
-  } catch {
+  } catch (err) {
+    if (err?.tooLarge) {
+      // Status first, then hang up: the caller learns why, and the rest of
+      // whatever they were sending is not read.
+      deny(res, 413, 'Request body is larger than this endpoint accepts.');
+      req.destroy();
+      return;
+    }
     deny(res, 400, 'Body must be JSON.');
     return;
   }
@@ -430,17 +437,43 @@ async function handleProvision(req, res) {
   }
 }
 
+/**
+ * A provisioning body is three short fields. Anything larger is a mistake or an
+ * attack, and this endpoint is reachable by every app on the platform.
+ */
+const MAX_BODY_BYTES = 4096;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
+    let settled = false;
+
+    // Rejecting alone is not enough: the promise settles but the socket keeps
+    // delivering, and `data` keeps growing. A client streaming a gigabyte would
+    // have all of it buffered here long after the caller gave up.
+    //
+    // So accumulation stops at the flag and the stream is paused -- not
+    // destroyed. Destroying here would tear the socket down before the caller
+    // could write a status, and the client would see a connection reset with no
+    // idea why. The caller sends 413 and closes it afterwards.
+    const stop = err => {
+      if (settled) return;
+      settled = true;
+      req.pause();
+      reject(err);
+    };
+
     req.on('data', chunk => {
+      if (settled) return;
       data += chunk;
-      // A provisioning body is three short fields; anything larger is a
-      // mistake or an attack, and is refused before it is buffered.
-      if (data.length > 4096) reject(new Error('body too large'));
+      if (data.length > MAX_BODY_BYTES) stop(Object.assign(new Error('body too large'), { tooLarge: true }));
     });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(data);
+    });
+    req.on('error', stop);
   });
 }
 
