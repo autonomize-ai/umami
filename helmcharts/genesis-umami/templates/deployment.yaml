@@ -194,6 +194,13 @@ spec:
             - name: BRIDGE_BLOCKED_CALLS
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- /* Where an app asks for its own analytics site. Set explicitly
+                   rather than left to the bridge's default so the path is
+                   visible in the rendered manifest -- it has to match the
+                   gateway route that publishes it, and a silent default makes
+                   that pairing easy to break. */}}
+            - name: BRIDGE_PROVISION_PATH
+              value: {{ .Values.bridge.provisionPath | default "/provision" | quote }}
             - name: UMAMI_STAFF_USER
               value: {{ .Values.staffSetup.username | quote }}
             - name: UMAMI_STAFF_PASSWORD
