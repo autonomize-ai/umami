@@ -883,3 +883,27 @@ tests:
       - matchRegex:
           path: data["staff-setup.sh"]
           pattern: "team-view-only"
+
+  # The provisioning path is how an app asks for its own analytics site without
+  # ever holding a Umami credential. It is answered by the bridge, so the bridge
+  # has to be on for the path to exist at all.
+  - it: exposes the provisioning path only when the bridge is running
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_PROVISION_PATH")].value
+          pattern: "^/provision$"
+
+  - it: has no provisioning path when the bridge is off
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+    template: templates/deployment.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1

@@ -107,6 +107,19 @@ const POST_SIGNIN_PATH = process.env.BRIDGE_POST_SIGNIN_PATH || '/websites';
 const RECENT_MINT_COOKIE = 'umami_bridge_signin';
 const RECENT_MINT_TTL_S = 120;
 
+/**
+ * Where an app asks for its own analytics site.
+ *
+ * Deliberately a path this bridge answers itself rather than one it proxies:
+ * Umami's own admin API is not reachable from the edge (the gateway publishes
+ * only the tracker script and the event collector anonymously; everything else
+ * under the prefix is behind a browser sign-in a server-to-server call cannot
+ * complete). This is the one narrow, create-only opening onto it.
+ */
+const PROVISION_PATH = process.env.BRIDGE_PROVISION_PATH || '/provision';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const log = (...args) => console.log('[bridge]', ...args);
 
 /**
@@ -312,6 +325,158 @@ function isEntryPath(pathname) {
   return stripped === '' || stripped === '/';
 }
 
+function isProvisionPath(pathname) {
+  return appPath(pathname) === PROVISION_PATH;
+}
+
+/**
+ * Create the analytics site for an app, if it does not already exist.
+ *
+ * WHY THIS LIVES HERE
+ *
+ * The alternative is giving every app a Umami login so it can create its own
+ * site. Umami's roles are a fixed constant and the weakest one that can create
+ * a website (`user`) also carries website:delete -- and deleting a site drops
+ * its events, replays, heatmaps and revenue rows in one transaction and then
+ * hard-deletes the site, with no soft-delete path outside CLOUD_MODE, which is
+ * not set. A create-only capability does not exist in Umami, so it has to be
+ * made: the credential stays here, behind a call that only ever creates.
+ *
+ * The bridge is already signed in as the staff account for the dashboard
+ * hand-off, so it needs no new credential -- and because Umami records
+ * `userId = auth.user.id` on create, a site made here is owned by that account
+ * from the first moment. It shows up on the staff Websites page immediately,
+ * with no ownership transfer and no window where a new app's site is invisible.
+ *
+ * IDEMPOTENT BY ID, NOT BY NAME
+ *
+ * The caller supplies the id it already computed from its own chart, so this is
+ * an upsert rather than a create: same app, same id, every time. Every replica
+ * calls this on every start and only the first one does anything. Matching on
+ * name instead would make two apps with the same display name collide.
+ */
+async function provisionSite({ websiteId, name, domain }) {
+  const token = await getServiceToken();
+  const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const existing = await fetch(`${UMAMI}${BASE_PATH}/api/websites/${websiteId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (existing.status === 401) {
+    // The cached token went stale; clear it so the next attempt re-logs in.
+    serviceToken = null;
+    throw new Error('service token rejected; cleared for retry');
+  }
+
+  if (existing.ok) {
+    const body = await existing.json().catch(() => null);
+    // A 200 with a null body is Umami's "not found" for this endpoint, so the
+    // body is checked rather than the status alone.
+    if (body?.id) return { created: false, websiteId: body.id };
+  }
+
+  const res = await fetch(`${UMAMI}${BASE_PATH}/api/websites`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ id: websiteId, name, domain }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`create failed: ${res.status} ${detail.slice(0, 200)}`);
+  }
+
+  return { created: true, websiteId };
+}
+
+async function handleProvision(req, res) {
+  if ((req.method || '').toUpperCase() !== 'POST') {
+    deny(res, 405, 'Use POST to provision an analytics site.');
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(req));
+  } catch (err) {
+    if (err?.tooLarge) {
+      // Status first, then hang up: the caller learns why, and the rest of
+      // whatever they were sending is not read.
+      deny(res, 413, 'Request body is larger than this endpoint accepts.');
+      req.destroy();
+      return;
+    }
+    deny(res, 400, 'Body must be JSON.');
+    return;
+  }
+
+  const { websiteId, name, domain } = payload || {};
+
+  // The id is the app's own computed value, so it is validated rather than
+  // trusted: a malformed one would create a site nothing can ever address.
+  if (!UUID_RE.test(websiteId || '')) {
+    deny(res, 400, 'websiteId must be a uuid the calling app computed for itself.');
+    return;
+  }
+  if (!name || !domain) {
+    deny(res, 400, 'name and domain are required.');
+    return;
+  }
+
+  try {
+    const result = await provisionSite({ websiteId, name, domain });
+    log('provision', result.created ? 'created' : 'already present', websiteId, name);
+    res.writeHead(result.created ? 201 : 200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+  } catch (err) {
+    // 502, not 500: the failure is upstream in Umami, and the caller is a
+    // deploy-time script that should log and carry on rather than crash.
+    log('provision failed', websiteId, '--', err.message);
+    deny(res, 502, 'Could not provision the analytics site.');
+  }
+}
+
+/**
+ * A provisioning body is three short fields. Anything larger is a mistake or an
+ * attack, and this endpoint is reachable by every app on the platform.
+ */
+const MAX_BODY_BYTES = 4096;
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    let settled = false;
+
+    // Rejecting alone is not enough: the promise settles but the socket keeps
+    // delivering, and `data` keeps growing. A client streaming a gigabyte would
+    // have all of it buffered here long after the caller gave up.
+    //
+    // So accumulation stops at the flag and the stream is paused -- not
+    // destroyed. Destroying here would tear the socket down before the caller
+    // could write a status, and the client would see a connection reset with no
+    // idea why. The caller sends 413 and closes it afterwards.
+    const stop = err => {
+      if (settled) return;
+      settled = true;
+      req.pause();
+      reject(err);
+    };
+
+    req.on('data', chunk => {
+      if (settled) return;
+      data += chunk;
+      if (data.length > MAX_BODY_BYTES) stop(Object.assign(new Error('body too large'), { tooLarge: true }));
+    });
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(data);
+    });
+    req.on('error', stop);
+  });
+}
+
 function deny(res, status, message) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: message }));
@@ -352,6 +517,28 @@ const server = http.createServer(async (req, res) => {
   if (isBlocked(req.method, pathname)) {
     log('refused', req.method, pathname, '-- destructive call');
     deny(res, 403, 'Deleting or resetting an analytics site is not permitted here. Sites are managed by deployment automation.');
+    return;
+  }
+
+  // After the denylist, so provisioning can never become a way around it, and
+  // before the proxy, so this path is answered here rather than forwarded to
+  // Umami as if it were a page.
+  //
+  // No role check: the caller is a deploying app, not a browser, and it carries
+  // an app key the gateway has already validated -- there is no platform-admin
+  // in this request to look for.
+  if (isProvisionPath(pathname)) {
+    // Guarded at the dispatch point, not only inside the handler. This
+    // callback is async, so anything that escapes it becomes an unhandled
+    // rejection -- and Node exits the process on those. A client that hangs up
+    // mid-write would take the sidecar down with it, and this sidecar shares a
+    // pod with Umami itself.
+    try {
+      await handleProvision(req, res);
+    } catch (err) {
+      log('provision handler failed unexpectedly --', err.message);
+      if (!res.headersSent) deny(res, 502, 'Could not provision the analytics site.');
+    }
     return;
   }
 

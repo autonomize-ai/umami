@@ -410,6 +410,23 @@ bridge:
   blockedCalls:
     - "DELETE:^/api/websites/[^/]+/?$"
     - "POST:^/api/websites/[^/]+/reset/?$"
+
+  # Where an app asks for its own analytics site.
+  #
+  # An app on this platform holds no Umami credential. It calls this path
+  # through the gateway with its own platform key, and the bridge -- already
+  # signed in as the staff account for the dashboard hand-off -- creates the
+  # site. Because Umami records the creator as the owner, the site belongs to
+  # that account from the first moment and appears on the staff Websites page
+  # with no ownership transfer and no adoption sweep.
+  #
+  # Deliberately create-only. The weakest Umami role that can create a website
+  # also carries website:delete, and deletion drops that site's events for good,
+  # so no app is handed a credential at all. The denylist above is checked
+  # before this path and applies regardless.
+  #
+  # Must match the gateway route that publishes it.
+  provisionPath: "/provision"
   resources:
     requests:
       cpu: 10m
