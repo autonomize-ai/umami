@@ -759,22 +759,25 @@ tests:
           path: data["keycloak-setup.sh"]
           pattern: '"consentRequired": false'
 
-  - it: blocks only the two destructive Umami calls
+  - it: blocks resetting a site, and no longer blocks deleting one
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
       bridge.enabled: true
     template: templates/deployment.yaml
     asserts:
-      # The account is a Umami admin so staff can actually work in the tool;
-      # deleting a site is refused here instead, because the site id is derived
-      # and would be recreated empty on the next deploy, silently.
-      - matchRegex:
-          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_BLOCKED_CALLS")].value
-          pattern: "DELETE:.*websites"
+      # Reset erases a site's events while leaving ingestion intact, so the loss
+      # is silent and total. Still refused.
       - matchRegex:
           path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_BLOCKED_CALLS")].value
           pattern: "reset"
+      # Deletion was opened up deliberately so staff can clean up sites.
+      # Asserted ABSENT rather than simply dropped from this test, so putting it
+      # back is a decision someone makes against a failing test -- not a silent
+      # drift that quietly re-breaks cleanup.
+      - notMatchRegex:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_BLOCKED_CALLS")].value
+          pattern: "DELETE"
 
   # This chart reaches an environment through a pinned version in the umbrella,
   # so a routine version bump must not switch a feature on by itself. An
