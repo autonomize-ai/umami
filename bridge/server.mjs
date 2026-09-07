@@ -46,28 +46,36 @@ const REQUIRED_ROLE = process.env.BRIDGE_REQUIRED_ROLE || 'platform-admin';
  * and manage teams, and Umami has no role that allows those while withholding
  * site deletion. Every role above "nothing" carries websiteDelete.
  *
- * So the line is drawn here instead, and only around the two calls that
- * destroy a website's data:
+ * So the line is drawn here instead, and now around one call:
  *
- *   DELETE /api/websites/{id}   removes the site
- *   POST   /api/websites/{id}/reset   erases its events
+ *   POST /api/websites/{id}/reset   erases a site's events
  *
- * Deleting a site is worse than losing history. The site id is what the
- * tracker posts events to, and it is DERIVED (a hash of the environment host
- * plus the chart name), not stored -- so the provisioning job recreates the
- * same id on the next deploy, empty. Ingestion silently resumes into a blank
- * site, the dashboard still loads, and the charts just start from zero. There
- * is no error to notice and nothing to restore.
+ * DELETE /api/websites/{id} WAS REFUSED HERE AND DELIBERATELY IS NOT ANY MORE,
+ * so staff can clean up sites -- test sites especially -- from the dashboard.
+ * The reasoning it overrode is kept rather than deleted, because the failure
+ * mode is quiet and whoever meets it should not have to rediscover why:
  *
- * Nobody's job requires either call: sites are created and maintained by
- * automation, never by hand. A human reaching them is always a mistake.
+ *   The site id a tracker posts to is DERIVED (a hash of the environment host
+ *   plus the chart name), not stored. So a deleted site is recreated under the
+ *   SAME id by the next deploy's provisioning call -- empty. Ingestion silently
+ *   resumes into a blank site, the dashboard still loads, and the charts just
+ *   start from zero. No error to notice, and nothing to restore.
  *
- * A denylist is normally the weaker pattern, but the surface here is two fixed
- * endpoints in a third-party API we do not control, so enumerating them is
- * both tractable and easier to review than the alternative.
+ * This changes what is convenient, not what is possible: Umami's API is
+ * reachable directly on the pod (127.0.0.1:3000), which this list never
+ * covered, so deletion was always available to anyone with pod access.
+ *
+ * NOTE this default is a FALLBACK, not the deployed policy. The chart sets
+ * BRIDGE_BLOCKED_CALLS from `bridge.blockedCalls` whenever that list is
+ * non-empty, so the values file wins. Keep the two in step: an environment
+ * that wants deletion re-blocked adds the pattern back there, not here.
+ *
+ * A denylist is normally the weaker pattern, but the surface here is a fixed
+ * endpoint in a third-party API we do not control, so enumerating it is both
+ * tractable and easier to review than the alternative.
  */
 const BLOCKED = (process.env.BRIDGE_BLOCKED_CALLS ||
-  'DELETE:^/api/websites/[^/]+/?$,POST:^/api/websites/[^/]+/reset/?$')
+  'POST:^/api/websites/[^/]+/reset/?$')
   .split(',')
   .map(entry => entry.trim())
   .filter(Boolean)

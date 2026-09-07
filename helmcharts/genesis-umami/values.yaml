@@ -282,8 +282,9 @@ staffSetup:
   # `admin` by default, so a platform admin arriving through the bridge can do
   # real work: save funnels and retention reports, organise boards, manage
   # teams. Umami offers no role that permits those while withholding site
-  # deletion -- every role above "nothing" carries websiteDelete -- so the two
-  # destructive calls are blocked at the bridge instead (bridge.blockedCalls).
+  # deletion -- every role above "nothing" carries websiteDelete -- so what is
+  # refused is drawn at the bridge instead (bridge.blockedCalls), which now
+  # covers reset only. Site deletion is permitted, deliberately; see that key.
   #
   # Set to `view-only` for a strictly read-only posture. That account sees
   # nothing on its own, so the team and site-adoption steps below become
@@ -395,20 +396,36 @@ bridge:
     internalKeySecretKey: "GENESIS_API_KEY"
   # Calls refused outright, whatever the Umami account's role.
   #
-  # The account is a Umami admin so staff can actually work in the tool. These
-  # two are the exception, and deletion is the one that really matters: the
-  # site id is what the tracker posts events to, and it is DERIVED from the
-  # environment host plus chart name rather than stored -- so a deleted site is
-  # recreated empty under the SAME id on the next deploy. Ingestion silently
-  # resumes into a blank site, the dashboard still loads, and history is gone
-  # with no error and nothing to restore.
+  # The account is a Umami admin so staff can actually work in the tool. Reset
+  # is the exception: it erases a site's events while leaving ingestion intact,
+  # so the loss is silent and total, with nothing to restore.
   #
-  # Reset is included for the same data-loss reason, though it leaves ingestion
-  # intact. Drop it from this list if staff need it.
+  # DELETE WAS LISTED HERE AND DELIBERATELY IS NOT ANY MORE, so staff can clean
+  # up sites -- test sites especially -- from the dashboard. The reasoning it
+  # overrode is kept rather than deleted, because the failure mode is quiet and
+  # whoever meets it should not have to rediscover why:
   #
-  # Format: "METHOD:<regex against Umami's own path>". Set to [] to disable.
+  #   The site id a tracker posts to is DERIVED from the environment host plus
+  #   chart name, not stored. So a deleted site is recreated under the SAME id
+  #   by the next deploy's provisioning call -- empty. Ingestion silently
+  #   resumes into a blank site, the dashboard still loads, and the charts just
+  #   start from zero. No error to notice, and nothing to restore.
+  #
+  # Re-block it for one environment by adding the pattern back under that
+  # environment's values: this list is the chart default and any environment
+  # overrides it wholesale.
+  #
+  # Note the bridge was never the only route to deletion -- Umami's API is
+  # reachable directly on the pod (127.0.0.1:3000), which this list does not
+  # cover. This changes what is convenient, not what is possible.
+  #
+  # Format: "METHOD:<regex against Umami's own path>".
+  #
+  # `[]` does NOT refuse nothing. The deployment wraps this in `with`, which
+  # skips an empty list, so no BRIDGE_BLOCKED_CALLS is set and the bridge falls
+  # back to its own default -- which refuses reset. To refuse nothing at all,
+  # change that default in bridge/server.mjs too.
   blockedCalls:
-    - "DELETE:^/api/websites/[^/]+/?$"
     - "POST:^/api/websites/[^/]+/reset/?$"
 
   # Where an app asks for its own analytics site.
@@ -420,10 +437,15 @@ bridge:
   # that account from the first moment and appears on the staff Websites page
   # with no ownership transfer and no adoption sweep.
   #
-  # Deliberately create-only. The weakest Umami role that can create a website
-  # also carries website:delete, and deletion drops that site's events for good,
-  # so no app is handed a credential at all. The denylist above is checked
-  # before this path and applies regardless.
+  # Deliberately create-only, and that is unchanged by the denylist above no
+  # longer covering DELETE. Two different callers: staff reach the bridge from a
+  # browser through the dashboard route, while an APP reaches only this path,
+  # which creates and nothing else. The weakest Umami role that can create a
+  # website also carries website:delete, so no app is handed a credential at
+  # all -- opening deletion up for staff does not open it up for apps.
+  #
+  # The denylist is still checked before this path, so anything listed there
+  # applies regardless of which caller arrived.
   #
   # Must match the gateway route that publishes it.
   provisionPath: "/provision"
