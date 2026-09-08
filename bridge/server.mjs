@@ -258,6 +258,53 @@ async function getServiceToken() {
 }
 
 /**
+ * Run an authenticated call against Umami, re-logging in once if the cached
+ * service token is rejected.
+ *
+ * WHY THIS EXISTS
+ *
+ * The cached token can stop working while the pod is perfectly healthy: the
+ * staff password was rotated, APP_SECRET changed, or the staff-setup Job
+ * recreated the account. Every path here used to handle that by clearing the
+ * cache and throwing "cleared for retry" -- which fixed the NEXT caller and
+ * failed the current one.
+ *
+ * That is a bad trade for both callers. A staff member got a 502 signing in and
+ * had to click again for no visible reason. Worse, an app provisioning its
+ * analytics site got a 502 at startup, and its site is created ONCE per boot --
+ * so a single stale token cost that app its analytics until the next deploy,
+ * silently. Both were observed on dev: a 502, then success on the very next
+ * attempt with nothing else changed.
+ *
+ * The token is cheap to re-mint (one login against a process in the same pod)
+ * and staleness is exactly the condition a retry fixes, so the retry belongs
+ * here rather than in every caller.
+ *
+ * Bounded at one extra attempt on purpose: two 401s in a row is a credential
+ * problem, not a stale cache, and looping would bury that behind a hang.
+ */
+async function withServiceToken(call) {
+  const first = await call(await getServiceToken());
+  if (first.status !== 401) return first;
+
+  log('service token rejected; re-logging in and retrying once');
+  serviceToken = null;
+
+  const second = await call(await getServiceToken());
+  if (second.status === 401) {
+    // Clear again so a caller after this one starts clean, but say plainly that
+    // a fresh login was also refused -- that is a credential fault, and the
+    // old "cleared for retry" wording sent people looking for a cache bug.
+    serviceToken = null;
+    throw new Error(
+      'service token rejected even after re-login -- check UMAMI_STAFF_USER / ' +
+      'UMAMI_STAFF_PASSWORD and that the staff account still exists',
+    );
+  }
+  return second;
+}
+
+/**
  * Mint the token the browser actually receives.
  *
  * /api/auth/sso is the ONLY Umami endpoint that produces an expiring token —
@@ -269,20 +316,12 @@ async function getServiceToken() {
  * which is why REDIS_URL is a hard prerequisite for the chart, not a nicety.
  */
 async function mintBrowserToken() {
-  const token = await getServiceToken();
-
-  const res = await fetch(`${UMAMI}${BASE_PATH}/api/auth/sso`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (res.status === 401) {
-    // The cached service token stopped working — the account's password was
-    // rotated, or APP_SECRET changed. Drop it and let the next request retry
-    // from a fresh login rather than failing for the life of the pod.
-    serviceToken = null;
-    throw new Error('service token rejected; cleared for retry');
-  }
+  const res = await withServiceToken(token =>
+    fetch(`${UMAMI}${BASE_PATH}/api/auth/sso`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    }),
+  );
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
@@ -364,18 +403,14 @@ function isProvisionPath(pathname) {
  * name instead would make two apps with the same display name collide.
  */
 async function provisionSite({ websiteId, name, domain }) {
-  const token = await getServiceToken();
-  const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-
-  const existing = await fetch(`${UMAMI}${BASE_PATH}/api/websites/${websiteId}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (existing.status === 401) {
-    // The cached token went stale; clear it so the next attempt re-logs in.
-    serviceToken = null;
-    throw new Error('service token rejected; cleared for retry');
-  }
+  // Both calls go through withServiceToken, so a stale cached token costs a
+  // re-login rather than this app's analytics. Each resolves the token when it
+  // runs -- the create below must not reuse a token the lookup just replaced.
+  const existing = await withServiceToken(token =>
+    fetch(`${UMAMI}${BASE_PATH}/api/websites/${websiteId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }),
+  );
 
   if (existing.ok) {
     const body = await existing.json().catch(() => null);
@@ -384,11 +419,13 @@ async function provisionSite({ websiteId, name, domain }) {
     if (body?.id) return { created: false, websiteId: body.id };
   }
 
-  const res = await fetch(`${UMAMI}${BASE_PATH}/api/websites`, {
-    method: 'POST',
-    headers: auth,
-    body: JSON.stringify({ id: websiteId, name, domain }),
-  });
+  const res = await withServiceToken(token =>
+    fetch(`${UMAMI}${BASE_PATH}/api/websites`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: websiteId, name, domain }),
+    }),
+  );
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
