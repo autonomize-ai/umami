@@ -759,6 +759,24 @@ tests:
           path: data["keycloak-setup.sh"]
           pattern: '"consentRequired": false'
 
+  - it: publishes the insights read path to the bridge, with its guard rails
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      # Set explicitly rather than left to the bridge's default, because it has
+      # to match the gateway route that publishes it.
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_INSIGHTS_PATH")].value
+          value: "/insights"
+      # The window cap is what stops an app asking Umami to scan all history.
+      # Asserted so it cannot be dropped silently in a values refactor.
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_INSIGHTS_MAX_DAYS")].value
+          value: "90"
+
   - it: blocks resetting a site, and no longer blocks deleting one
     set:
       enabled: true
