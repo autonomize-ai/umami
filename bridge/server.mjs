@@ -73,6 +73,15 @@ const REQUIRED_ROLE = process.env.BRIDGE_REQUIRED_ROLE || 'platform-admin';
  * A denylist is normally the weaker pattern, but the surface here is a fixed
  * endpoint in a third-party API we do not control, so enumerating it is both
  * tractable and easier to review than the alternative.
+ *
+ * NO LONGER THE PRIMARY CONTROL. Reset is now refused by genesis-authz: the
+ * bridge registers that path as a resource_pattern requiring
+ * `umami_site can_reset`, a relation granted to nobody, so the gateway answers
+ * 403 before this process is reached (see buildRoutePayload). This list stays
+ * for two reasons -- it is defence in depth against a misregistered route, and
+ * it is the operator knob for an environment that wants MORE refused than the
+ * model does. Keep the two in step: something added here and nowhere else is
+ * only enforced for callers that come through this proxy.
  */
 const BLOCKED = (process.env.BRIDGE_BLOCKED_CALLS ||
   'POST:^/api/websites/[^/]+/reset/?$')
@@ -310,6 +319,38 @@ function buildRoutePayload() {
     priority: 10,
   });
 
+  // Resetting a site is refused by genesis-authz, not by this process.
+  //
+  // `can_reset` is defined on umami_site and granted to nobody, so the check
+  // returns false and the gateway answers 403 before the request arrives here.
+  // The relation is deliberately NOT derived from `owner` -- an app owns its
+  // site so it can provision and read it, never so it can erase it -- and it
+  // admits `user` only, so an app cannot be granted it even by mistake.
+  //
+  // Expressed as a permission rather than a refusal because it makes the answer
+  // changeable: if staff ever need to reset a test site, someone writes one
+  // tuple in genesis-authz instead of editing BRIDGE_BLOCKED_CALLS and
+  // redeploying Umami.
+  //
+  // action_override is required. The method here is POST, which would otherwise
+  // resolve to can_create by the method->action default, and can_create is not
+  // a relation on this type.
+  //
+  // The denylist below still runs. It is now defence in depth rather than the
+  // control -- the same posture as the entry path's role re-check, and for the
+  // same reason: this process registers the very route it depends on, so a bug
+  // in the list above could disable its own gate. It also remains the operator
+  // knob (bridge.blockedCalls) for an environment that wants more refused.
+  routes.push({
+    kind: 'resource_pattern',
+    pattern_template: `${prefix}/api/websites/{siteId}/reset`,
+    resource_type: 'umami_site',
+    id_param: 'siteId',
+    params: [{ name: 'siteId', type: 'uuid' }],
+    action_override: 'can_reset',
+    priority: 10,
+  });
+
   // Provisioning stays authenticated-only: the caller is creating its OWN site
   // from an id it computed itself, so there is no existing resource to check a
   // permission against. What bounds it instead is that the call only ever
@@ -357,8 +398,9 @@ async function registerRoutes(attempt = 1) {
 
     if (res.ok) {
       log(
-        `registered ${ROUTE_MAX_DEPTH + 3} route patterns with genesis-authz ` +
-          '(insights authorized per site, provision authenticated, rest bypass)',
+        `registered ${ROUTE_MAX_DEPTH + 4} route patterns with genesis-authz ` +
+          '(insights + reset authorized per site, provision authenticated, ' +
+          'rest bypass)',
       );
       return;
     }

@@ -396,6 +396,17 @@ bridge:
     internalKeySecretKey: "GENESIS_API_KEY"
   # Calls refused outright, whatever the Umami account's role.
   #
+  # NO LONGER THE PRIMARY CONTROL for reset. The bridge registers that path
+  # with genesis-authz as requiring `umami_site can_reset` -- a relation
+  # granted to nobody -- so the gateway refuses it with a 403 before the
+  # bridge is reached. This list is now defence in depth against a
+  # misregistered route, plus the knob for an environment that wants MORE
+  # refused than the model does.
+  #
+  # To ALLOW a reset, do not empty this list: grant the can_reset tuple in
+  # genesis-authz to the person who needs it. That is auditable and revocable,
+  # which a chart edit is not.
+  #
   # The account is a Umami admin so staff can actually work in the tool. Reset
   # is the exception: it erases a site's events while leaving ingestion intact,
   # so the loss is silent and total, with nothing to restore.
