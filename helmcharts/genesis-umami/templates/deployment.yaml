@@ -212,6 +212,8 @@ spec:
               value: {{ .Values.bridge.insightsDefaultDays | default 7 | quote }}
             - name: BRIDGE_INSIGHTS_TOP_N
               value: {{ .Values.bridge.insightsTopN | default 10 | quote }}
+            - name: BRIDGE_INSIGHTS_MAX_TOP_N
+              value: {{ .Values.bridge.insightsMaxTopN | default 100 | quote }}
             - name: UMAMI_STAFF_USER
               value: {{ .Values.staffSetup.username | quote }}
             - name: UMAMI_STAFF_PASSWORD

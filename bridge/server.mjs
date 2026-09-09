@@ -156,6 +156,98 @@ const INSIGHTS_DEFAULT_DAYS = Number(
   process.env.BRIDGE_INSIGHTS_DEFAULT_DAYS || 7,
 );
 const INSIGHTS_TOP_N = Number(process.env.BRIDGE_INSIGHTS_TOP_N || 10);
+const INSIGHTS_MAX_TOP_N = Number(process.env.BRIDGE_INSIGHTS_MAX_TOP_N || 100);
+
+/**
+ * The sections /insights can return, and the Umami query behind each.
+ *
+ * `include` picks from these; omitting it returns every one. A caller gets
+ * everything by default and narrows from there, which is the whole point of the
+ * parameter -- discovering the shape should not require reading this file.
+ *
+ * `kind` decides how the section is fetched: 'stats' is the one aggregate call,
+ * everything else is /metrics with a `type`. Umami validates that type against
+ * EVENT_COLUMNS + SESSION_COLUMNS and refuses anything else with a bare 400, so
+ * the values below are copied from its own constants rather than invented.
+ *
+ * WHAT IS DELIBERATELY ABSENT, AND WHY
+ *
+ * Umami also serves type=title, type=query and type=fullPath. They are not
+ * offered here, and this is the one list in the file that is a privacy decision
+ * rather than a convenience one:
+ *
+ *   * `title` returns page titles. The app-side collector NEVER sends a title
+ *     -- in a healthcare app a tab title carries a name as readily as a URL
+ *     ("Claim 44021 -- Jane Doe") -- but a site instrumented with Umami's own
+ *     script.js does send them, and this endpoint serves every site. Verified
+ *     live: type=title returns "User Management | Autonomize | AI Studio".
+ *   * `query` and `fullPath` carry query strings, which the app side drops
+ *     WHOLE rather than scrubbing, because they are the likeliest place for a
+ *     search term or a member number to appear.
+ *   * `distinctId` identifies a person. This endpoint answers "how often", and
+ *     aggregates only.
+ *
+ * Adding any of them re-exposes exactly what the collector strips. If a caller
+ * needs them, that is a conversation about the collector, not a new section.
+ */
+const INSIGHTS_SECTIONS = {
+  totals:      { kind: 'stats' },
+  pages:       { kind: 'metrics', type: 'path' },
+  entry_pages: { kind: 'metrics', type: 'entry' },
+  exit_pages:  { kind: 'metrics', type: 'exit' },
+  referrers:   { kind: 'metrics', type: 'referrer' },
+  events:      { kind: 'metrics', type: 'event' },
+  tags:        { kind: 'metrics', type: 'tag' },
+  hostnames:   { kind: 'metrics', type: 'hostname' },
+  browsers:    { kind: 'metrics', type: 'browser' },
+  os:          { kind: 'metrics', type: 'os' },
+  devices:     { kind: 'metrics', type: 'device' },
+  screens:     { kind: 'metrics', type: 'screen' },
+  languages:   { kind: 'metrics', type: 'language' },
+  countries:   { kind: 'metrics', type: 'country' },
+  regions:     { kind: 'metrics', type: 'region' },
+  cities:      { kind: 'metrics', type: 'city' },
+  utm_sources:   { kind: 'metrics', type: 'utmSource' },
+  utm_mediums:   { kind: 'metrics', type: 'utmMedium' },
+  utm_campaigns: { kind: 'metrics', type: 'utmCampaign' },
+};
+
+/**
+ * Which sections a section name belongs to, for the family warning below.
+ *
+ * Umami stores a page view and a custom event as different rows (event_type 1
+ * vs 2). So an `event=` filter narrows to custom-event rows, and a pageview
+ * section filtered that way returns zero -- not an error, an empty
+ * intersection. Verified live: stats?event=workflow_run_started answers 200
+ * with pageviews: 0, and metrics?type=path with the same filter answers [].
+ *
+ * The filter is still passed through rather than quietly rescoped per section:
+ * a `totals` that silently means something else when a filter is present is
+ * worse than a zero the caller can see and a note explaining it.
+ */
+const PAGEVIEW_SECTIONS = new Set([
+  'totals', 'pages', 'entry_pages', 'exit_pages', 'referrers',
+]);
+
+/**
+ * Filters passed through to Umami, copied from its own filterParams schema.
+ *
+ * An allowlist, not passthrough: this endpoint is deliberately not a proxy, and
+ * an unknown parameter is refused rather than forwarded, so a caller cannot
+ * reach a filter Umami adds in a future release without this file being
+ * updated on purpose.
+ *
+ * Absent for the same reasons as the sections above: `title`, `query` and
+ * `distinctId`. Also absent: `segment` and `cohort`, which are uuids naming
+ * Umami objects that may belong to another site -- a cross-site read dressed
+ * as a filter.
+ */
+const INSIGHTS_FILTERS = new Set([
+  'path', 'referrer', 'event', 'tag', 'hostname',
+  'os', 'browser', 'device', 'language', 'country', 'region', 'city',
+  'utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm',
+  'eventType', 'excludeBounce', 'match',
+]);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -191,8 +283,51 @@ const ROUTE_MAX_DEPTH = Number(process.env.AUTHZ_ROUTE_MAX_DEPTH || 9);
 
 function buildRoutePayload() {
   const prefix = BASE_PATH || '/umami';
-  const routes = [{ kind: 'bypass', pattern_template: prefix, params: [] }];
+  const routes = [];
 
+  // THE ONE ROUTE THAT IS AUTHORIZED PER RESOURCE.
+  //
+  // `resource_pattern` makes /verify check `umami_site can_view` on the id it
+  // captures from the path, against the tuple registerSiteOwnership() wrote.
+  // The check therefore happens at the GATEWAY, before this process is reached
+  // -- an app asking for a site it does not own is refused upstream, and this
+  // handler needs no authorization code of its own.
+  //
+  // This is why the site id is a path segment: every URI matcher in
+  // genesis-authz strips the query string before matching, so `?site=<uuid>`
+  // would leave the rule with no object to check. `resource_pattern` also
+  // derives the action from the HTTP method, and the route is GET-only, so it
+  // resolves to can_view without an action_override.
+  //
+  // Ordered first, and given the lowest priority number, because the catch-all
+  // below would otherwise match the same URI and bypass it.
+  routes.push({
+    kind: 'resource_pattern',
+    pattern_template: `${prefix}/insights/{siteId}`,
+    resource_type: 'umami_site',
+    id_param: 'siteId',
+    params: [{ name: 'siteId', type: 'uuid' }],
+    priority: 10,
+  });
+
+  // Provisioning stays authenticated-only: the caller is creating its OWN site
+  // from an id it computed itself, so there is no existing resource to check a
+  // permission against. What bounds it instead is that the call only ever
+  // creates, and that the ownership tuple is written from the gateway-stamped
+  // identity rather than from anything in the body.
+  routes.push({ kind: 'bypass', pattern_template: `${prefix}/provision`, params: [], priority: 20 });
+
+  // Everything else -- the dashboard, its assets, Umami's own API behind the
+  // browser session -- stays as it was: authenticated by the gateway, with the
+  // role decision made by the route's requiredRoles rather than per resource.
+  // There is no Umami resource modelled in FGA for those, and the dashboard is
+  // staff-only, so a bypass is honest about what is actually enforced.
+  //
+  // Still one row per depth, because the widest param type matches a single
+  // segment and Umami's own tree reaches six levels below the prefix. The
+  // insights and provision rows above win on priority, so widening this cannot
+  // silently turn the resource check off.
+  routes.push({ kind: 'bypass', pattern_template: prefix, params: [], priority: 100 });
   for (let depth = 1; depth <= ROUTE_MAX_DEPTH; depth++) {
     const names = Array.from({ length: depth }, (_, i) => `s${i}`);
     routes.push({
@@ -200,6 +335,7 @@ function buildRoutePayload() {
       pattern_template: `${prefix}/${names.map(n => `{${n}}`).join('/')}`,
       // `any` is one path segment. Segment count is what the depth expresses.
       params: names.map(name => ({ name, type: 'any' })),
+      priority: 100,
     });
   }
 
@@ -220,7 +356,10 @@ async function registerRoutes(attempt = 1) {
     });
 
     if (res.ok) {
-      log(`registered ${ROUTE_MAX_DEPTH + 1} route patterns with genesis-authz`);
+      log(
+        `registered ${ROUTE_MAX_DEPTH + 3} route patterns with genesis-authz ` +
+          '(insights authorized per site, provision authenticated, rest bypass)',
+      );
       return;
     }
 
@@ -248,6 +387,74 @@ async function registerRoutes(attempt = 1) {
       return;
     }
     setTimeout(() => registerRoutes(attempt + 1), Math.min(30000, 2000 * attempt));
+  }
+}
+
+/**
+ * Record who owns an analytics site, in genesis-authz.
+ *
+ * WHY THIS EXISTS
+ *
+ * Without it this endpoint set has no ownership at all: an app that knows
+ * another app's site id can read its numbers, and ids are derived from host +
+ * chart name, so they are guessable. One tuple per site closes that, and it
+ * closes BOTH boundaries at once -- cross-org and, more strictly, two sibling
+ * apps inside one organization.
+ *
+ * WHY THE OWNER IS THE SERVICE ACCOUNT AND NOT THE ORG
+ *
+ * Two siblings share an organization, so an org-level record cannot separate
+ * them. The service account can: the gateway resolves the caller's API key and
+ * stamps X-User-Id, so the identity recorded here is one the app cannot choose.
+ * It requires one service account per app -- if two apps share a key they are
+ * one identity to the platform and no record here can tell them apart.
+ *
+ * The org is recorded as the parent anyway. It enforces nothing for apps (no
+ * service account is a tenant admin) and exists so a customer's org admin can
+ * later read every site in their own org through `tenant_admin from
+ * organization` in the model, with no per-site tuple ever written.
+ *
+ * NEVER FATAL. A site whose tuple could not be written is readable by nobody
+ * once the check is enforced, which is the safe direction to fail -- but it
+ * must not take down the provisioning call that an app makes at boot.
+ */
+async function registerSiteOwnership(websiteId, ownerId, organizationId) {
+  if (!AUTHZ_URL || !AUTHZ_KEY) {
+    log('ownership: not recorded -- AUTHZ_INTERNAL_URL/KEY not set');
+    return false;
+  }
+  if (!ownerId) {
+    // The gateway stamps X-User-Id after resolving the caller's credential, so
+    // an absent one means this request did not come through the gateway. Worth
+    // saying plainly: it is the difference between "unowned" and "misrouted".
+    log('ownership: not recorded for', websiteId, '-- no X-User-Id on the request');
+    return false;
+  }
+
+  try {
+    const res = await fetch(`${AUTHZ_URL}/internal/authz/register-resource`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Call': AUTHZ_KEY },
+      body: JSON.stringify({
+        resource_type: 'umami_site',
+        resource_id: websiteId,
+        owner_type: 'service_account',
+        owner_id: ownerId,
+        ...(organizationId
+          ? { parent_type: 'organization', parent_id: organizationId }
+          : {}),
+      }),
+    });
+    if (res.ok) {
+      log('ownership: site', websiteId, 'owned by service_account', ownerId);
+      return true;
+    }
+    const detail = await res.text().catch(() => '');
+    log(`ownership: register failed ${res.status} ${detail.slice(0, 200)}`);
+    return false;
+  } catch (err) {
+    log('ownership: register failed --', err.message);
+    return false;
   }
 }
 
@@ -407,8 +614,30 @@ function isProvisionPath(pathname) {
   return appPath(pathname) === PROVISION_PATH;
 }
 
-function isInsightsPath(pathname) {
-  return appPath(pathname) === INSIGHTS_PATH;
+/**
+ * Match /insights/{siteId} and return the site id, or null.
+ *
+ * THE SITE ID IS A PATH SEGMENT, NOT A QUERY PARAMETER, AND THAT IS LOAD-BEARING.
+ *
+ * genesis-authz authorizes a request by mapping its PATH to a permission, and
+ * every URI matcher on that side strips the query string before matching. So
+ * `?site=<uuid>` gives the authorization rule no object to check -- the site id
+ * has to be in the path for a per-site permission to be expressible at all.
+ * That is why this moved, and it is the reason the route can be registered as
+ * a `resource_pattern` rather than a `bypass` (see buildRoutePayload).
+ *
+ * The bare collection path is deliberately NOT matched: /insights with no id
+ * would have to mean "every site", which is the one thing this endpoint must
+ * never answer.
+ */
+function insightsSiteId(pathname) {
+  const stripped = appPath(pathname);
+  if (!stripped.startsWith(`${INSIGHTS_PATH}/`)) return null;
+  const rest = stripped.slice(INSIGHTS_PATH.length + 1);
+  // One segment only. A deeper path is a different endpoint, not this one with
+  // a suffix, and letting it match here would make `/insights/{id}/anything`
+  // silently return the site's numbers.
+  return rest && !rest.includes('/') ? rest : null;
 }
 
 /**
@@ -453,6 +682,7 @@ async function provisionSite({ websiteId, name, domain }) {
     // body is checked rather than the status alone.
     if (body?.id) return { created: false, websiteId: body.id };
   }
+
 
   const res = await withServiceToken(token =>
     fetch(`${UMAMI}${BASE_PATH}/api/websites`, {
@@ -504,11 +734,27 @@ async function handleProvision(req, res) {
     return;
   }
 
+  // Stamped by the gateway from the caller's own credential, after it clears
+  // any copy the client tried to send. So this is the one identity in the
+  // request the app cannot choose for itself -- which is what makes it usable
+  // as an ownership record.
+  const ownerId = req.headers['x-user-id'] || '';
+  const organizationId = req.headers['x-organization-id'] || '';
+
   try {
     const result = await provisionSite({ websiteId, name, domain });
     log('provision', result.created ? 'created' : 'already present', websiteId, name);
+
+    // Recorded on every call, not only on create. Provisioning runs on every
+    // replica at every boot, so this is also how a site that predates
+    // ownership adopts its owner: the first app to provision after this ships
+    // claims it. That is the migration, and it needs no backfill script.
+    //
+    // register-resource is an upsert on (type, id), so repeats are harmless.
+    const owned = await registerSiteOwnership(websiteId, ownerId, organizationId);
+
     res.writeHead(result.created ? 201 : 200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(result));
+    res.end(JSON.stringify({ ...result, ownershipRecorded: owned }));
   } catch (err) {
     // 502, not 500: the failure is upstream in Umami, and the caller is a
     // deploy-time script that should log and carry on rather than crash.
@@ -597,20 +843,19 @@ async function umamiGet(path) {
  * recorded at provision time, checked here -- and nothing else about this
  * endpoint changes.
  */
-async function handleInsights(req, res) {
+async function handleInsights(req, res, site) {
   if ((req.method || '').toUpperCase() !== 'GET') {
     deny(res, 405, 'Use GET to read analytics.');
     return;
   }
 
-  const params = new URL(req.url, 'http://localhost').searchParams;
-  const site = (params.get('site') || '').trim();
-
   // Validated, not trusted: this value is interpolated into an upstream URL.
   if (!UUID_RE.test(site)) {
-    deny(res, 400, 'site must be the uuid of an analytics site.');
+    deny(res, 400, 'The site id in the path must be a uuid.');
     return;
   }
+
+  const params = new URL(req.url, 'http://localhost').searchParams;
 
   const window = resolveWindow(params);
   if (window.error) {
@@ -618,62 +863,154 @@ async function handleInsights(req, res) {
     return;
   }
 
+  // `include` omitted means every section. Narrowing is opt-in so a caller
+  // discovers the shape by asking once, rather than by reading this file.
+  const requested = (params.get('include') || '')
+    .split(',')
+    .map(name => name.trim())
+    .filter(Boolean);
+  const unknown = requested.filter(name => !(name in INSIGHTS_SECTIONS));
+  if (unknown.length) {
+    deny(
+      res,
+      400,
+      `Unknown section(s): ${unknown.join(', ')}. Available: ` +
+        `${Object.keys(INSIGHTS_SECTIONS).join(', ')}.`,
+    );
+    return;
+  }
+  const sections = requested.length ? requested : Object.keys(INSIGHTS_SECTIONS);
+
+  // Per-section row cap. Bounded on both ends: 0 or a negative would make Umami
+  // return everything, which is the query this endpoint exists to prevent.
+  let limit = INSIGHTS_TOP_N;
+  const rawLimit = params.get('limit');
+  if (rawLimit !== null) {
+    const n = Number(rawLimit);
+    if (!Number.isInteger(n) || n < 1 || n > INSIGHTS_MAX_TOP_N) {
+      deny(res, 400, `limit must be an integer between 1 and ${INSIGHTS_MAX_TOP_N}.`);
+      return;
+    }
+    limit = n;
+  }
+
+  // Filters: allowlisted, then forwarded verbatim. An unknown one is refused
+  // rather than dropped, because a silently ignored filter returns a WIDER
+  // result than the caller asked for -- the wrong way to be wrong.
+  const filters = new URLSearchParams();
+  for (const [key, value] of params.entries()) {
+    if (key === 'from' || key === 'to' || key === 'include' || key === 'limit') continue;
+    if (!INSIGHTS_FILTERS.has(key)) {
+      deny(res, 400, `Unknown filter '${key}'. Available: ${[...INSIGHTS_FILTERS].join(', ')}.`);
+      return;
+    }
+    if (value !== '') filters.append(key, value);
+  }
+
+  // An event filter selects custom-event rows, so any page-view section
+  // narrowed by it comes back empty -- a real property of Umami's schema, not a
+  // bug here. Said out loud in the response rather than papered over by
+  // rescoping the filter per section, which would make `totals` mean two
+  // different things depending on the query string.
+  const notes = [];
+  if (filters.has('event') || filters.get('eventType') === '2') {
+    const affected = sections.filter(name => PAGEVIEW_SECTIONS.has(name));
+    if (affected.length) {
+      notes.push(
+        'An event filter matches custom-event rows only, so these page-view ' +
+          `sections report zero: ${affected.join(', ')}. Umami stores a page ` +
+          'view and a custom event as different row types.',
+      );
+    }
+  }
+
+  const range = `startAt=${window.from}&endAt=${window.to}`;
+  const suffix = filters.toString() ? `&${filters.toString()}` : '';
+
   try {
     // Existence first, because /stats answers 200 with zeros for a site that
     // does not exist. Without this an app with a wrong id reads 'no traffic'
     // and concludes its analytics is broken rather than its id is.
     const site_row = await umamiGet(`/api/websites/${site}`);
     if (!site_row?.id) {
-      deny(
-        res,
-        404,
-        'No analytics site with that id. Has the app provisioned yet?',
-      );
+      deny(res, 404, 'No analytics site with that id. Has the app provisioned yet?');
       return;
     }
 
-    const range = `startAt=${window.from}&endAt=${window.to}`;
-    const [stats, pages, referrers] = await Promise.all([
-      umamiGet(`/api/websites/${site}/stats?${range}`),
-      // `path`, not `url` -- Umami's metrics endpoint validates `type` against
-      // EVENT_COLUMNS (src/lib/constants.ts) and refuses anything else with a
-      // bare 400. Checked against the source, not guessed.
-      umamiGet(
-        `/api/websites/${site}/metrics?type=path&${range}&limit=${INSIGHTS_TOP_N}`,
-      ),
-      umamiGet(
-        `/api/websites/${site}/metrics?type=referrer&${range}&limit=${INSIGHTS_TOP_N}`,
-      ),
-    ]);
-
     // `{x, y}` is Umami's shape for a metrics row. Renamed on the way out so an
     // app is not coupled to it -- this response is the contract, Umami's is not.
-    const rows = (list) =>
-      (Array.isArray(list) ? list : []).map((r) => ({ name: r.x, views: r.y }));
+    //
+    // `country` is carried through where Umami sets it, which is the region and
+    // city rows. It is not decoration: city names are not globally unique
+    // ("Bengaluru" needs no help, "Springfield" does), so dropping it would
+    // make those rows ambiguous with no way for a caller to recover it.
+    const rows = list =>
+      (Array.isArray(list) ? list : []).map(r =>
+        r.country === undefined
+          ? { name: r.x, views: r.y }
+          : { name: r.x, views: r.y, country: r.country },
+      );
+
+    // Fetched in parallel: independent reads, and a caller asking for every
+    // section should not pay for them serially. Each settles on its own so one
+    // failing section does not lose the rest.
+    const results = await Promise.all(
+      sections.map(async name => {
+        const spec = INSIGHTS_SECTIONS[name];
+        const path =
+          spec.kind === 'stats'
+            ? `/api/websites/${site}/stats?${range}${suffix}`
+            : `/api/websites/${site}/metrics?type=${spec.type}&${range}&limit=${limit}${suffix}`;
+        try {
+          return [name, await umamiGet(path), null];
+        } catch (err) {
+          return [name, null, err.message];
+        }
+      }),
+    );
+
+    const body = {
+      site,
+      window: {
+        from: new Date(window.from).toISOString(),
+        to: new Date(window.to).toISOString(),
+      },
+    };
+    const failed = [];
+
+    for (const [name, data, err] of results) {
+      if (err) {
+        failed.push(name);
+        continue;
+      }
+      if (INSIGHTS_SECTIONS[name].kind === 'stats') {
+        body.totals = {
+          pageviews: data?.pageviews ?? 0,
+          visitors: data?.visitors ?? 0,
+          visits: data?.visits ?? 0,
+          bounces: data?.bounces ?? 0,
+          // Umami reports seconds; named so nobody has to guess the unit.
+          total_time_seconds: data?.totaltime ?? 0,
+        };
+      } else {
+        body[name] = rows(data);
+      }
+    }
+
+    // A partial answer beats none: the caller asked for many sections and a
+    // metrics tile should render what it has. The failure is named so it is not
+    // mistaken for "no data".
+    if (failed.length) {
+      log('insights: section(s) failed for', site, '--', failed.join(', '));
+      notes.push(`These sections could not be read and are omitted: ${failed.join(', ')}.`);
+    }
+    if (notes.length) body.notes = notes;
 
     res.writeHead(200, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
     });
-    res.end(
-      JSON.stringify({
-        site,
-        window: {
-          from: new Date(window.from).toISOString(),
-          to: new Date(window.to).toISOString(),
-        },
-        totals: {
-          pageviews: stats?.pageviews ?? 0,
-          visitors: stats?.visitors ?? 0,
-          visits: stats?.visits ?? 0,
-          bounces: stats?.bounces ?? 0,
-          // Umami reports seconds; named so nobody has to guess the unit.
-          total_time_seconds: stats?.totaltime ?? 0,
-        },
-        top_pages: rows(pages),
-        top_referrers: rows(referrers),
-      }),
-    );
+    res.end(JSON.stringify(body));
   } catch (err) {
     // 502: the failure is upstream in Umami. The caller is an app rendering a
     // page and should degrade rather than break, so the message stays generic
@@ -795,11 +1132,12 @@ const server = http.createServer(async (req, res) => {
   // No role check. The caller is an app, not a browser, carrying a platform key
   // the gateway has already validated -- there is no platform-admin in this
   // request to look for.
-  if (isInsightsPath(pathname)) {
+  const insightsSite = insightsSiteId(pathname);
+  if (insightsSite) {
     // Guarded at the dispatch point for the same reason as above: an escaped
     // rejection from this async callback would exit the process.
     try {
-      await handleInsights(req, res);
+      await handleInsights(req, res, insightsSite);
     } catch (err) {
       log('insights handler failed unexpectedly --', err.message);
       if (!res.headersSent) deny(res, 502, 'Could not read analytics.');

@@ -458,18 +458,30 @@ bridge:
   # reset, and deletion is deliberately allowed. So the bridge makes four fixed
   # read calls and returns a fixed shape.
   #
-  # It does NOT enforce ownership. Every app presents the same platform key, so
-  # the gateway cannot tell them apart and this serves whatever site id it is
-  # given -- and ids are derived from host + chart name, so they are guessable.
-  # A deliberate trade for internal apps, revisitable by recording an ownership
-  # tuple in genesis-authz at provision time without changing this endpoint.
+  # Ownership IS enforced, at the gateway rather than here. The bridge records
+  # `umami_site:<id> owner service_account:<caller>` in genesis-authz at
+  # provision time, from the identity the gateway stamped, and registers this
+  # path as a `resource_pattern` route -- so /verify checks `umami_site
+  # can_view` before the request reaches this process. That separates two
+  # sibling apps in one organization, which an org-level check cannot.
+  #
+  # It requires ONE SERVICE ACCOUNT PER APP. Two apps sharing a key are one
+  # identity to the platform, and no record here can tell them apart.
   #
   # Must match the gateway route that publishes it.
+  # The site id is a PATH segment: /insights/{siteId}, not ?site=. That is what
+  # lets genesis-authz authorize the call per site -- every URI matcher there
+  # strips the query string before matching, so an id in the query leaves the
+  # authorization rule with no object to check.
   insightsPath: "/insights"
   # Guard rails on the query, so no app can make Umami scan all of history.
   insightsMaxDays: 90
   insightsDefaultDays: 7
+  # Default rows per section, and the ceiling a caller may raise it to. Bounded
+  # on both ends: an unbounded limit is the query this endpoint exists to
+  # prevent.
   insightsTopN: 10
+  insightsMaxTopN: 100
   resources:
     requests:
       cpu: 10m
