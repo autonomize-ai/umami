@@ -449,6 +449,27 @@ bridge:
   #
   # Must match the gateway route that publishes it.
   provisionPath: "/provision"
+
+  # Where an app reads its OWN aggregated numbers back.
+  #
+  # A NAMED endpoint, not a proxy onto Umami's API. Publishing
+  # /api/websites/{id}/* to apps would hand them most of the dashboard API under
+  # a shared key, including calls that mutate; blockedCalls above only refuses
+  # reset, and deletion is deliberately allowed. So the bridge makes four fixed
+  # read calls and returns a fixed shape.
+  #
+  # It does NOT enforce ownership. Every app presents the same platform key, so
+  # the gateway cannot tell them apart and this serves whatever site id it is
+  # given -- and ids are derived from host + chart name, so they are guessable.
+  # A deliberate trade for internal apps, revisitable by recording an ownership
+  # tuple in genesis-authz at provision time without changing this endpoint.
+  #
+  # Must match the gateway route that publishes it.
+  insightsPath: "/insights"
+  # Guard rails on the query, so no app can make Umami scan all of history.
+  insightsMaxDays: 90
+  insightsDefaultDays: 7
+  insightsTopN: 10
   resources:
     requests:
       cpu: 10m

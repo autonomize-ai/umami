@@ -126,6 +126,37 @@ const RECENT_MINT_TTL_S = 120;
  */
 const PROVISION_PATH = process.env.BRIDGE_PROVISION_PATH || '/provision';
 
+/**
+ * Where an app reads its OWN numbers back.
+ *
+ * A NAMED endpoint, emphatically not a proxy onto Umami's API. Publishing
+ * /api/websites/{id}/* to apps would hand every one of them most of the
+ * dashboard API under a shared key -- including calls that MUTATE. The denylist
+ * above refuses ONE call, reset; site deletion was deliberately opened up so
+ * staff can clean up test sites. So a proxy would let any app delete any site,
+ * and 'read-only' would be an assumption rather than a property.
+ *
+ * So this makes exactly three upstream calls, with a fixed response shape. An
+ * app never reaches Umami's API surface, and widening what apps can see is a
+ * deliberate edit here rather than an accident of routing.
+ *
+ * Aggregates only, never raw event rows. The write path deliberately strips
+ * record ids out of URLs, drops query strings whole and never sends page titles;
+ * handing per-visit rows back would undo that on the way out.
+ */
+const INSIGHTS_PATH = process.env.BRIDGE_INSIGHTS_PATH || '/insights';
+
+/**
+ * A window cap, so no app can ask Umami to scan all of history. Seven days is
+ * the default when the caller names no window -- the common case is a dashboard
+ * tile, not an audit.
+ */
+const INSIGHTS_MAX_DAYS = Number(process.env.BRIDGE_INSIGHTS_MAX_DAYS || 90);
+const INSIGHTS_DEFAULT_DAYS = Number(
+  process.env.BRIDGE_INSIGHTS_DEFAULT_DAYS || 7,
+);
+const INSIGHTS_TOP_N = Number(process.env.BRIDGE_INSIGHTS_TOP_N || 10);
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const log = (...args) => console.log('[bridge]', ...args);
@@ -376,6 +407,10 @@ function isProvisionPath(pathname) {
   return appPath(pathname) === PROVISION_PATH;
 }
 
+function isInsightsPath(pathname) {
+  return appPath(pathname) === INSIGHTS_PATH;
+}
+
 /**
  * Create the analytics site for an app, if it does not already exist.
  *
@@ -483,6 +518,172 @@ async function handleProvision(req, res) {
 }
 
 /**
+ * Resolve the requested window to two epoch-millisecond bounds.
+ *
+ * Accepts `from`/`to` as either epoch millis or anything Date can parse, so a
+ * caller can send an ISO date without formatting gymnastics. Returns an
+ * { error } instead of throwing, because every failure here is a 400 the caller
+ * needs explained rather than an exception.
+ */
+function resolveWindow(params) {
+  const parse = (raw, fallback) => {
+    if (!raw) return fallback;
+    const asNumber = Number(raw);
+    const ms =
+      Number.isFinite(asNumber) && String(asNumber) === String(raw).trim()
+        ? asNumber
+        : Date.parse(raw);
+    return Number.isFinite(ms) ? ms : NaN;
+  };
+
+  const to = parse(params.get('to'), Date.now());
+  const from = parse(params.get('from'), to - INSIGHTS_DEFAULT_DAYS * 86400000);
+
+  if (!Number.isFinite(from) || !Number.isFinite(to)) {
+    return { error: 'from/to must be epoch milliseconds or a parseable date.' };
+  }
+  if (from >= to) return { error: '`from` must be earlier than `to`.' };
+
+  const days = (to - from) / 86400000;
+  if (days > INSIGHTS_MAX_DAYS) {
+    return {
+      error:
+        `Window is ${Math.ceil(days)} days; the maximum is ` +
+        `${INSIGHTS_MAX_DAYS}. Ask for a narrower range.`,
+    };
+  }
+  return { from: Math.floor(from), to: Math.floor(to) };
+}
+
+/**
+ * One authenticated GET against Umami, returning parsed JSON.
+ *
+ * Goes through withServiceToken so a stale cached token costs a re-login rather
+ * than the caller's request -- the same reason provisioning does.
+ */
+async function umamiGet(path) {
+  const res = await withServiceToken((token) =>
+    fetch(`${UMAMI}${BASE_PATH}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }),
+  );
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(
+      `${path.split('?')[0]} returned ${res.status} ${detail.slice(0, 120)}`,
+    );
+  }
+  return res.json();
+}
+
+/**
+ * Read one site's aggregated numbers.
+ *
+ * WHAT THIS DELIBERATELY IS NOT
+ *
+ * Not a proxy. Three fixed upstream calls, one fixed response shape. See the
+ * INSIGHTS_PATH comment for why that distinction is the whole point.
+ *
+ * WHAT IT DOES NOT ENFORCE
+ *
+ * Ownership. Every app presents the same platform key, so the gateway cannot
+ * tell one app from another and this endpoint serves whatever site id it is
+ * given. An app that knows another app's id can read that app's numbers, and
+ * the ids are derived from host + chart name, so they are guessable.
+ *
+ * That is a decision, not an oversight: app-level isolation would require a key
+ * per app, and the trade was judged not worth it for internal apps. If it ever
+ * becomes worth it, the shape to add is an ownership tuple in genesis-authz --
+ * recorded at provision time, checked here -- and nothing else about this
+ * endpoint changes.
+ */
+async function handleInsights(req, res) {
+  if ((req.method || '').toUpperCase() !== 'GET') {
+    deny(res, 405, 'Use GET to read analytics.');
+    return;
+  }
+
+  const params = new URL(req.url, 'http://localhost').searchParams;
+  const site = (params.get('site') || '').trim();
+
+  // Validated, not trusted: this value is interpolated into an upstream URL.
+  if (!UUID_RE.test(site)) {
+    deny(res, 400, 'site must be the uuid of an analytics site.');
+    return;
+  }
+
+  const window = resolveWindow(params);
+  if (window.error) {
+    deny(res, 400, window.error);
+    return;
+  }
+
+  try {
+    // Existence first, because /stats answers 200 with zeros for a site that
+    // does not exist. Without this an app with a wrong id reads 'no traffic'
+    // and concludes its analytics is broken rather than its id is.
+    const site_row = await umamiGet(`/api/websites/${site}`);
+    if (!site_row?.id) {
+      deny(
+        res,
+        404,
+        'No analytics site with that id. Has the app provisioned yet?',
+      );
+      return;
+    }
+
+    const range = `startAt=${window.from}&endAt=${window.to}`;
+    const [stats, pages, referrers] = await Promise.all([
+      umamiGet(`/api/websites/${site}/stats?${range}`),
+      // `path`, not `url` -- Umami's metrics endpoint validates `type` against
+      // EVENT_COLUMNS (src/lib/constants.ts) and refuses anything else with a
+      // bare 400. Checked against the source, not guessed.
+      umamiGet(
+        `/api/websites/${site}/metrics?type=path&${range}&limit=${INSIGHTS_TOP_N}`,
+      ),
+      umamiGet(
+        `/api/websites/${site}/metrics?type=referrer&${range}&limit=${INSIGHTS_TOP_N}`,
+      ),
+    ]);
+
+    // `{x, y}` is Umami's shape for a metrics row. Renamed on the way out so an
+    // app is not coupled to it -- this response is the contract, Umami's is not.
+    const rows = (list) =>
+      (Array.isArray(list) ? list : []).map((r) => ({ name: r.x, views: r.y }));
+
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    });
+    res.end(
+      JSON.stringify({
+        site,
+        window: {
+          from: new Date(window.from).toISOString(),
+          to: new Date(window.to).toISOString(),
+        },
+        totals: {
+          pageviews: stats?.pageviews ?? 0,
+          visitors: stats?.visitors ?? 0,
+          visits: stats?.visits ?? 0,
+          bounces: stats?.bounces ?? 0,
+          // Umami reports seconds; named so nobody has to guess the unit.
+          total_time_seconds: stats?.totaltime ?? 0,
+        },
+        top_pages: rows(pages),
+        top_referrers: rows(referrers),
+      }),
+    );
+  } catch (err) {
+    // 502: the failure is upstream in Umami. The caller is an app rendering a
+    // page and should degrade rather than break, so the message stays generic
+    // and the detail goes to the log.
+    log('insights failed', site, '--', err.message);
+    deny(res, 502, 'Could not read analytics for that site.');
+  }
+}
+
+/**
  * A provisioning body is three short fields. Anything larger is a mistake or an
  * attack, and this endpoint is reachable by every app on the platform.
  */
@@ -583,6 +784,25 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       log('provision handler failed unexpectedly --', err.message);
       if (!res.headersSent) deny(res, 502, 'Could not provision the analytics site.');
+    }
+    return;
+  }
+
+  // Same placement rationale as provisioning: after the denylist so this can
+  // never become a way around it, and before the proxy so the path is answered
+  // here rather than forwarded to Umami as if it were a page.
+  //
+  // No role check. The caller is an app, not a browser, carrying a platform key
+  // the gateway has already validated -- there is no platform-admin in this
+  // request to look for.
+  if (isInsightsPath(pathname)) {
+    // Guarded at the dispatch point for the same reason as above: an escaped
+    // rejection from this async callback would exit the process.
+    try {
+      await handleInsights(req, res);
+    } catch (err) {
+      log('insights handler failed unexpectedly --', err.message);
+      if (!res.headersSent) deny(res, 502, 'Could not read analytics.');
     }
     return;
   }

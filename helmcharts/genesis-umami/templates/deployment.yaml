@@ -201,6 +201,17 @@ spec:
                    that pairing easy to break. */}}
             - name: BRIDGE_PROVISION_PATH
               value: {{ .Values.bridge.provisionPath | default "/provision" | quote }}
+            {{- /* Set explicitly for the same reason as the provisioning path:
+                   it has to match the gateway route that publishes it, and a
+                   silent default makes that pairing easy to break. */}}
+            - name: BRIDGE_INSIGHTS_PATH
+              value: {{ .Values.bridge.insightsPath | default "/insights" | quote }}
+            - name: BRIDGE_INSIGHTS_MAX_DAYS
+              value: {{ .Values.bridge.insightsMaxDays | default 90 | quote }}
+            - name: BRIDGE_INSIGHTS_DEFAULT_DAYS
+              value: {{ .Values.bridge.insightsDefaultDays | default 7 | quote }}
+            - name: BRIDGE_INSIGHTS_TOP_N
+              value: {{ .Values.bridge.insightsTopN | default 10 | quote }}
             - name: UMAMI_STAFF_USER
               value: {{ .Values.staffSetup.username | quote }}
             - name: UMAMI_STAFF_PASSWORD
