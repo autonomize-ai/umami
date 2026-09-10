@@ -6,8 +6,24 @@ packages:
 # exactly to 7.1.5 - the version CVE-2026-40345 / GHSA-ggr8-5vv4-36mx is filed
 # against. The pin is still exact in @prisma/config 7.10.0, so no prisma upgrade
 # reaches a patched release and an override is the only route to one.
+#
+# mysql2 3.15.3 carries GHSA-3f6p-5ww8-9rcr (high, auth plugin downgrade leaks
+# plaintext credentials, fixed in 3.22.0) and GHSA-rgwj-5xj2-c3m3 (moderate,
+# unbounded zlib inflate in the compressed protocol handler, fixed in 3.23.1).
+# prisma depends on mysql2 and pins it exactly to 3.15.3 - still exact in
+# 7.10.0 - so no prisma 7.x release reaches a patched version and an override
+# is the only route to one. Nothing here loads it: the datasource is postgresql
+# through @prisma/adapter-pg, and mysql2 only ships because the prisma package
+# depends on it unconditionally.
+#
+# sharp 0.35.3 carries GHSA-rgj7-g3m4-5g8c (high, the bundled libheif), fixed
+# in 0.35.4. next declares sharp as an optional dependency at ^0.35.3, so
+# 0.35.4 already sits inside the range it asks for; the override only holds the
+# lockfile there so the patched build cannot drift back.
 overrides:
   deepmerge-ts: '^8.0.2'
+  mysql2: '^3.23.1'
+  sharp: '^0.35.4'
 allowBuilds:
   '@parcel/watcher': false
   '@prisma/engines': true
