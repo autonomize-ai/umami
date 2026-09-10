@@ -201,6 +201,14 @@ spec:
                    that pairing easy to break. */}}
             - name: BRIDGE_PROVISION_PATH
               value: {{ .Values.bridge.provisionPath | default "/provision" | quote }}
+            {{- /* The prefix the app-facing read API is served under -- NOT
+                   basePath. genesis-authz checks bypass registrations before
+                   per-resource ones, and the bridge bypasses Umami's whole
+                   tree, so a per-site rule under basePath never runs. Rendered
+                   explicitly because it has to match the gateway route that
+                   publishes it. */}}
+            - name: BRIDGE_API_BASE_PATH
+              value: {{ .Values.bridge.apiBasePath | default "/analytics" | quote }}
             {{- /* Set explicitly for the same reason as the provisioning path:
                    it has to match the gateway route that publishes it, and a
                    silent default makes that pairing easy to break. */}}
@@ -212,6 +220,8 @@ spec:
               value: {{ .Values.bridge.insightsDefaultDays | default 7 | quote }}
             - name: BRIDGE_INSIGHTS_TOP_N
               value: {{ .Values.bridge.insightsTopN | default 10 | quote }}
+            - name: BRIDGE_INSIGHTS_MAX_TOP_N
+              value: {{ .Values.bridge.insightsMaxTopN | default 100 | quote }}
             - name: UMAMI_STAFF_USER
               value: {{ .Values.staffSetup.username | quote }}
             - name: UMAMI_STAFF_PASSWORD
