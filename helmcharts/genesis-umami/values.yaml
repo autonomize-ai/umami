@@ -479,6 +479,19 @@ bridge:
   # It requires ONE SERVICE ACCOUNT PER APP. Two apps sharing a key are one
   # identity to the platform, and no record here can tell them apart.
   #
+  # The prefix the app-facing read API is published under, and it is NOT the
+  # prefix Umami is served from (`basePath`). It cannot be.
+  #
+  # genesis-authz checks `bypass` registrations BEFORE per-resource ones and
+  # compares no priority across the two kinds (verify.py:1486 vs ~1753,
+  # verify.py:743-753). The bridge registers prefix-wide bypass rows for
+  # Umami's own tree -- nothing there is modelled in FGA -- and those rows match
+  # by segment count, so they swallow any per-resource rule under the same
+  # prefix. Published under `basePath`, the per-site check would silently never
+  # run and one app would read another's numbers with a 200.
+  #
+  # Must match the gateway route that publishes it (`/analytics/insights/*`).
+  apiBasePath: "/analytics"
   # Must match the gateway route that publishes it.
   # The site id is a PATH segment: /insights/{siteId}, not ?site=. That is what
   # lets genesis-authz authorize the call per site -- every URI matcher there

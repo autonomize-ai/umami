@@ -771,6 +771,16 @@ tests:
       - equal:
           path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_INSIGHTS_PATH")].value
           value: "/insights"
+      # The read API is published OUTSIDE the Umami prefix on purpose: authz
+      # checks bypass rows before per-resource rows, and the bridge bypasses
+      # Umami's whole tree, so a per-site rule under /umami never runs. If this
+      # ever equals basePath again, per-site isolation is off.
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_API_BASE_PATH")].value
+          value: "/analytics"
+      - notEqual:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_API_BASE_PATH")].value
+          value: "/umami"
       # The window cap is what stops an app asking Umami to scan all history.
       # Asserted so it cannot be dropped silently in a values refactor.
       - equal:

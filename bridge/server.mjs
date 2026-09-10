@@ -125,6 +125,48 @@ const RECENT_MINT_COOKIE = 'umami_bridge_signin';
 const RECENT_MINT_TTL_S = 120;
 
 /**
+ * The prefix the app-facing READ API is published under -- and it is
+ * deliberately NOT the prefix Umami itself is served from.
+ *
+ * WHY A SECOND PREFIX EXISTS AT ALL
+ *
+ * genesis-authz resolves a request by the KIND of registration that matches
+ * its path, not by how specific the match is:
+ *
+ *   * `verify.py:1486` consults `_should_bypass_auth()` BEFORE it reaches the
+ *     resource-pattern branch (~`verify.py:1753`), and a bypass short-circuits
+ *     authorization entirely.
+ *   * `verify.py:743-753` returns on the FIRST matching bypass regex. No
+ *     priority comparison happens; `priority` only orders rows WITHIN one kind
+ *     (`repositories/route_registration.py:47`).
+ *
+ * This process registers prefix-wide `bypass` rows for Umami's own tree,
+ * because none of it is modelled in FGA and its gate is the gateway's
+ * requiredRoles. Those rows match by segment COUNT, so any path under the
+ * Umami prefix is covered by one of them -- including a per-site read. A
+ * `resource_pattern` registered under that prefix is therefore never reached:
+ * compiling these very rows with genesis-authz's own `compile_pattern` and
+ * running its bypass loop verbatim, `/umami/insights/{uuid}` matches
+ * `^/umami/(?:[^/]+)/(?:[^/]+)/?$` and skips authorization altogether. The
+ * read then SUCCEEDS -- one app reads another's numbers with a 200, and
+ * nothing logs a refusal.
+ *
+ * The compiler cannot express the exclusion either: templates reject regex
+ * metacharacters outright, so there is no way to say "any two segments except
+ * insights/{uuid}".
+ *
+ * So the read API moves out from under the bypassed prefix instead. Nothing is
+ * registered under this one but the per-site rule itself, which means every
+ * other path here default-denies -- the safe direction.
+ *
+ * Whoever fixes precedence in genesis-authz should NOT quietly fold this back
+ * into the Umami prefix: the two are different surfaces, one third-party and
+ * bypassed wholesale, one ours and authorized per site, and keeping them apart
+ * is what makes that statement checkable.
+ */
+const API_BASE_PATH = (process.env.BRIDGE_API_BASE_PATH || '/analytics').replace(/\/$/, '');
+
+/**
  * Where an app asks for its own analytics site.
  *
  * Deliberately a path this bridge answers itself rather than one it proxies:
@@ -276,9 +318,14 @@ const log = (...args) => console.log('[bridge]', ...args);
  * repository. Umami is third-party and cannot make this call itself, so the
  * bridge -- which already sits in its pod and is our code -- makes it.
  *
- * `bypass` is the right kind: it means "skip the OpenFGA resource check, still
- * require authentication". There is no Umami resource modelled in FGA, and the
- * authorization for this tree is the gateway's requiredRoles gate.
+ * `bypass` is the right kind for Umami's own tree: it means "skip the OpenFGA
+ * resource check, still require authentication". There is no Umami resource
+ * modelled in FGA, and the authorization for that tree is the gateway's
+ * requiredRoles gate.
+ *
+ * The app-facing read API is the exception, and it is registered under a
+ * DIFFERENT prefix so a bypass row cannot swallow it -- see API_BASE_PATH,
+ * which is the one thing to read before editing anything below.
  */
 const AUTHZ_URL = (process.env.AUTHZ_INTERNAL_URL || '').replace(/\/$/, '');
 const AUTHZ_KEY = process.env.AUTHZ_INTERNAL_KEY || '';
@@ -292,9 +339,18 @@ const ROUTE_MAX_DEPTH = Number(process.env.AUTHZ_ROUTE_MAX_DEPTH || 9);
 
 function buildRoutePayload() {
   const prefix = BASE_PATH || '/umami';
+  const apiPrefix = API_BASE_PATH || '/analytics';
   const routes = [];
 
   // THE ONE ROUTE THAT IS AUTHORIZED PER RESOURCE.
+  //
+  // Registered under apiPrefix, NOT prefix. The bypass rows below match by
+  // segment count, so a resource_pattern under the Umami prefix is shadowed by
+  // one of them and never runs -- genesis-authz checks bypass BEFORE resource
+  // patterns and compares no priority across kinds. See API_BASE_PATH for the
+  // mechanism and the proof. Priority is still set below, but it orders rows
+  // only within a kind; it is not what keeps this rule alive. Being outside
+  // the bypassed prefix is.
   //
   // `resource_pattern` makes /verify check `umami_site can_view` on the id it
   // captures from the path, against the tuple registerSiteOwnership() wrote.
@@ -308,21 +364,37 @@ function buildRoutePayload() {
   // derives the action from the HTTP method, and the route is GET-only, so it
   // resolves to can_view without an action_override.
   //
-  // Ordered first, and given the lowest priority number, because the catch-all
-  // below would otherwise match the same URI and bypass it.
+  // Ordered first and given the lowest priority number for legibility -- the
+  // rule that authorizes per site should read first. What actually protects it
+  // from the catch-all is the prefix, not the number.
   routes.push({
     kind: 'resource_pattern',
-    pattern_template: `${prefix}/insights/{siteId}`,
+    pattern_template: `${apiPrefix}/insights/{siteId}`,
     resource_type: 'umami_site',
     id_param: 'siteId',
     params: [{ name: 'siteId', type: 'uuid' }],
     priority: 10,
   });
 
-  // Resetting a site is refused by genesis-authz, not by this process.
+  // Reset, expressed as a permission -- and INERT TODAY. Read this before
+  // relying on it.
   //
-  // `can_reset` is defined on umami_site and granted to nobody, so the check
-  // returns false and the gateway answers 403 before the request arrives here.
+  // This row sits under the Umami prefix and is shadowed by the catch-all
+  // bypass below exactly as the insights row would have been (the depth-4 one,
+  // `^/umami/(?:[^/]+)/(?:[^/]+)/(?:[^/]+)/(?:[^/]+)/?$`). So the `can_reset`
+  // check does NOT run, and the live control is the denylist above.
+  //
+  // Unlike insights, it cannot be moved out of the way: this is Umami's OWN
+  // API path, called by the dashboard in a browser. Changing it would mean
+  // patching third-party code.
+  //
+  // It is registered anyway, for two reasons. It costs one row, and it is the
+  // correct rule -- so when precedence in genesis-authz is fixed (a wide
+  // bypass should not shadow a narrow resource_pattern; see API_BASE_PATH) this
+  // becomes the gate with no change here. Until then the honest description is:
+  // BRIDGE_BLOCKED_CALLS refuses reset, and this row documents who should be
+  // allowed to when someone can ask that question properly.
+  //
   // The relation is deliberately NOT derived from `owner` -- an app owns its
   // site so it can provision and read it, never so it can erase it -- and it
   // admits `user` only, so an app cannot be granted it even by mistake.
@@ -335,12 +407,6 @@ function buildRoutePayload() {
   // action_override is required. The method here is POST, which would otherwise
   // resolve to can_create by the method->action default, and can_create is not
   // a relation on this type.
-  //
-  // The denylist below still runs. It is now defence in depth rather than the
-  // control -- the same posture as the entry path's role re-check, and for the
-  // same reason: this process registers the very route it depends on, so a bug
-  // in the list above could disable its own gate. It also remains the operator
-  // knob (bridge.blockedCalls) for an environment that wants more refused.
   routes.push({
     kind: 'resource_pattern',
     pattern_template: `${prefix}/api/websites/{siteId}/reset`,
@@ -365,9 +431,14 @@ function buildRoutePayload() {
   // staff-only, so a bypass is honest about what is actually enforced.
   //
   // Still one row per depth, because the widest param type matches a single
-  // segment and Umami's own tree reaches six levels below the prefix. The
-  // insights and provision rows above win on priority, so widening this cannot
-  // silently turn the resource check off.
+  // segment and Umami's own tree reaches six levels below the prefix.
+  //
+  // These rows are why the insights rule lives under apiPrefix. Widening them
+  // does NOT stay clear of a resource_pattern on the same prefix: bypass is
+  // checked first and no priority is compared across kinds, so a row here
+  // silently turns off any per-resource check under this prefix. That is
+  // already true of the reset row above. Anything that must be authorized per
+  // resource belongs outside this prefix.
   routes.push({ kind: 'bypass', pattern_template: prefix, params: [], priority: 100 });
   for (let depth = 1; depth <= ROUTE_MAX_DEPTH; depth++) {
     const names = Array.from({ length: depth }, (_, i) => `s${i}`);
@@ -633,6 +704,19 @@ function appPath(pathname) {
     : pathname;
 }
 
+/**
+ * Strip the app-facing API prefix, the counterpart to appPath() above.
+ *
+ * Separate because the two prefixes mean different things: BASE_PATH is where
+ * third-party Umami is mounted, API_BASE_PATH is where this bridge answers for
+ * itself. See API_BASE_PATH for why they cannot be the same string.
+ */
+function apiPath(pathname) {
+  return API_BASE_PATH && pathname.startsWith(API_BASE_PATH)
+    ? pathname.slice(API_BASE_PATH.length) || '/'
+    : null;
+}
+
 function mintedRecently(req) {
   const raw = req.headers.cookie || '';
   return raw.split(';').some(c => c.trim().startsWith(`${RECENT_MINT_COOKIE}=`));
@@ -668,13 +752,20 @@ function isProvisionPath(pathname) {
  * That is why this moved, and it is the reason the route can be registered as
  * a `resource_pattern` rather than a `bypass` (see buildRoutePayload).
  *
+ * Matched under API_BASE_PATH, not BASE_PATH: a `resource_pattern` under the
+ * Umami prefix is shadowed by the bypass rows registered for that tree and
+ * never runs. See API_BASE_PATH for the proof. A request to the OLD path is
+ * not answered here any more -- it meets the dashboard route's platform-admin
+ * gate at the gateway and is refused there, which is the fail-closed
+ * direction.
+ *
  * The bare collection path is deliberately NOT matched: /insights with no id
  * would have to mean "every site", which is the one thing this endpoint must
  * never answer.
  */
 function insightsSiteId(pathname) {
-  const stripped = appPath(pathname);
-  if (!stripped.startsWith(`${INSIGHTS_PATH}/`)) return null;
+  const stripped = apiPath(pathname);
+  if (!stripped || !stripped.startsWith(`${INSIGHTS_PATH}/`)) return null;
   const rest = stripped.slice(INSIGHTS_PATH.length + 1);
   // One segment only. A deeper path is a different endpoint, not this one with
   // a suffix, and letting it match here would make `/insights/{id}/anything`
@@ -872,18 +963,24 @@ async function umamiGet(path) {
  * Not a proxy. Three fixed upstream calls, one fixed response shape. See the
  * INSIGHTS_PATH comment for why that distinction is the whole point.
  *
- * WHAT IT DOES NOT ENFORCE
+ * WHAT IT DOES NOT ENFORCE, AND WHY THAT IS CORRECT
  *
- * Ownership. Every app presents the same platform key, so the gateway cannot
- * tell one app from another and this endpoint serves whatever site id it is
- * given. An app that knows another app's id can read that app's numbers, and
- * the ids are derived from host + chart name, so they are guessable.
+ * Ownership -- deliberately, because this process CANNOT enforce it. It calls
+ * Umami with the staff token, so by the time a request reaches here the
+ * caller's own identity is gone. Any check written in this function would be
+ * checking the bridge's permissions, not the app's.
  *
- * That is a decision, not an oversight: app-level isolation would require a key
- * per app, and the trade was judged not worth it for internal apps. If it ever
- * becomes worth it, the shape to add is an ownership tuple in genesis-authz --
- * recorded at provision time, checked here -- and nothing else about this
- * endpoint changes.
+ * So it is enforced one hop earlier, at the gateway:
+ * registerSiteOwnership() records `umami_site:<id> owner
+ * service_account:<caller>` at provision time from the identity the gateway
+ * stamped, and this path is registered as a `resource_pattern`, so /verify
+ * checks `umami_site can_view` on the id in the URL and answers 403 before
+ * this handler runs. Ids are derived from host + chart name and so are
+ * guessable; knowing one now gets a 403 rather than another app's numbers.
+ *
+ * That check is live only because the route sits outside the bypassed Umami
+ * prefix -- see API_BASE_PATH. If someone moves it back, this handler keeps
+ * serving whatever site id it is handed, silently and with a 200.
  */
 async function handleInsights(req, res, site) {
   if ((req.method || '').toUpperCase() !== 'GET') {
