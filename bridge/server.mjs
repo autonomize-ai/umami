@@ -164,7 +164,13 @@ const RECENT_MINT_TTL_S = 120;
  * bypassed wholesale, one ours and authorized per site, and keeping them apart
  * is what makes that statement checkable.
  */
-const API_BASE_PATH = (process.env.BRIDGE_API_BASE_PATH || '/analytics').replace(/\/$/, '');
+// Normalized to a non-empty prefix, so the path this process SERVES and the
+// path it REGISTERS are the same string by construction. `/` would otherwise
+// strip to '' and split the two apart -- registering /analytics while serving
+// nothing -- which is the exact class of mismatch this whole constant exists
+// to prevent.
+const API_BASE_PATH =
+  (process.env.BRIDGE_API_BASE_PATH || '/analytics').replace(/\/$/, '') || '/analytics';
 
 /**
  * Where an app asks for its own analytics site.
@@ -339,7 +345,7 @@ const ROUTE_MAX_DEPTH = Number(process.env.AUTHZ_ROUTE_MAX_DEPTH || 9);
 
 function buildRoutePayload() {
   const prefix = BASE_PATH || '/umami';
-  const apiPrefix = API_BASE_PATH || '/analytics';
+  const apiPrefix = API_BASE_PATH;
   const routes = [];
 
   // THE ONE ROUTE THAT IS AUTHORIZED PER RESOURCE.
@@ -712,7 +718,7 @@ function appPath(pathname) {
  * itself. See API_BASE_PATH for why they cannot be the same string.
  */
 function apiPath(pathname) {
-  return API_BASE_PATH && pathname.startsWith(API_BASE_PATH)
+  return pathname.startsWith(API_BASE_PATH)
     ? pathname.slice(API_BASE_PATH.length) || '/'
     : null;
 }
