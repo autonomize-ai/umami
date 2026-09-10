@@ -7,6 +7,8 @@ ARG PRISMA_VERSION="7.9.1"
 ARG AZURE_IDENTITY_VERSION="4.13.1"
 # Keep in sync with the deepmerge-ts override in pnpm-workspace.yaml
 ARG DEEPMERGE_TS_VERSION="^8.0.2"
+# Keep in sync with the mysql2 override in pnpm-workspace.yaml
+ARG MYSQL2_VERSION="^3.23.1"
 
 # Install dependencies only when needed
 FROM node:${NODE_IMAGE_VERSION} AS deps
@@ -51,6 +53,7 @@ ARG PNPM_VERSION
 ARG PRISMA_VERSION
 ARG AZURE_IDENTITY_VERSION
 ARG DEEPMERGE_TS_VERSION
+ARG MYSQL2_VERSION
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -79,11 +82,14 @@ RUN set -x \
 
 RUN echo {} > package.json
 
-# The override has to be repeated here. This stage resolves its own dependency
-# tree from scratch, and prisma pulls @prisma/config -> deepmerge-ts 7.1.5; the
-# app lockfile does not constrain it. Without this the runtime install puts the
-# vulnerable copy back into /app/node_modules and the image stays flagged.
-RUN printf "allowBuilds:\n  '@prisma/engines': true\n  prisma: false\nverifyDepsBeforeRun: false\noverrides:\n  deepmerge-ts: '${DEEPMERGE_TS_VERSION}'\n" > pnpm-workspace.yaml
+# The overrides have to be repeated here. This stage resolves its own dependency
+# tree from scratch, and prisma pulls @prisma/config -> deepmerge-ts 7.1.5 and
+# mysql2 3.15.3; the app lockfile does not constrain it. Without these the
+# runtime install puts the vulnerable copies back into /app/node_modules - and
+# writes them into the /app/pnpm-lock.yaml that `pnpm add` generates - so the
+# image stays flagged even though the app lockfile is clean. Both of those are
+# paths image scanning reports against.
+RUN printf "allowBuilds:\n  '@prisma/engines': true\n  prisma: false\nverifyDepsBeforeRun: false\noverrides:\n  deepmerge-ts: '${DEEPMERGE_TS_VERSION}'\n  mysql2: '${MYSQL2_VERSION}'\n" > pnpm-workspace.yaml
 
 # Script dependencies
 RUN pnpm add npm-run-all dotenv chalk semver \
