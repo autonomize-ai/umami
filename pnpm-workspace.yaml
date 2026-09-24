@@ -20,10 +20,19 @@ packages:
 # in 0.35.4. next declares sharp as an optional dependency at ^0.35.3, so
 # 0.35.4 already sits inside the range it asks for; the override only holds the
 # lockfile there so the patched build cannot drift back.
+# caniuse-lite / electron-to-chromium are browserslist-database packages next
+# pulls in as loose transitive ranges, unrelated to the CVE-2026-94545 next fix
+# in this change. pnpm 11's minimumReleaseAge (24h) rejects whatever happens to
+# be newest at build time, and since this org's own database updates multiple
+# times a day, "just re-resolve" keeps landing on another too-fresh release.
+# Pinned to versions already months old so the build stops racing the policy;
+# bump these independently whenever, they carry no security fix themselves.
 overrides:
   deepmerge-ts: '^8.0.2'
   mysql2: '^3.23.1'
   sharp: '^0.35.4'
+  caniuse-lite: '1.0.30001806'
+  electron-to-chromium: '1.5.397'
 allowBuilds:
   '@parcel/watcher': false
   '@prisma/engines': true
