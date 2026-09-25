@@ -851,7 +851,7 @@ tests:
   # at all and the Keycloak client the gateway's dashboard route depends on was
   # never provisioned -- the route redirected to Keycloak, which answered
   # "Client not found". Renders clean, fails only against a live cluster.
-  - it: falls back to the curl image when global.initImage is present but empty
+  - it: falls back to the Chainguard curl image when global.initImage is present but empty
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
@@ -862,7 +862,21 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].image
-          value: sprintregistry.azurecr.io/curl:8.5.0
+          value: sprintregistry.azurecr.io/chainguard/curl:cve-3.12.2
+
+  - it: pulls the fallback curl image from global.imageRegistry
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
+      keycloak.setup.enabled: true
+      global.initImage: ""
+      global.imageRegistry: customer-acr.azurecr.io
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: customer-acr.azurecr.io/chainguard/curl:cve-3.12.2
 
   - it: honours global.initImage when it actually carries a value
     set:
