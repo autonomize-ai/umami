@@ -341,3 +341,42 @@ Override staffSetup.userId to pin an exact value.
 {{- printf "%s-%s-4%s-a%s-%s" (substr 0 8 $h) (substr 8 12 $h) (substr 13 16 $h) (substr 17 20 $h) (substr 20 32 $h) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+  umami.platformHost — the host every tenant-isolation site id is seeded with.
+
+  MIRRORS genesis-lib.singleDomainHost EXACTLY (global.routing.host, else
+  "ai-studio.<global.domain | default local.dev>"). This chart does not depend
+  on genesis-lib -- it also renders standalone -- so it cannot call that helper,
+  and the copy has to stay byte-identical: genesis-fe seeded its existing site
+  id with that helper's output, and a different host string here is a different
+  hash, so every app would write to sites that do not exist, silently.
+
+  `dig` rather than direct paths, because .Values.global is nil standalone.
+  bridge.reconcile.platformHost overrides it for the rare case both sides are
+  known to agree on something else.
+*/}}
+{{- define "umami.platformHost" -}}
+{{- $global := .Values.global | default dict -}}
+{{- $override := dig "reconcile" "platformHost" "" (.Values.bridge | default dict) -}}
+{{- if $override -}}
+{{- $override -}}
+{{- else if dig "routing" "host" "" $global -}}
+{{- dig "routing" "host" "" $global -}}
+{{- else -}}
+{{- printf "ai-studio.%s" (dig "domain" "" $global | default "local.dev") -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  umami.bridgeRequiredRoles — the roles the bridge admits at its entry path, as
+  a comma-separated string. `requiredRoles` when non-empty, else the original
+  single `requiredRole`.
+*/}}
+{{- define "umami.bridgeRequiredRoles" -}}
+{{- if .Values.bridge.requiredRoles -}}
+{{- join "," .Values.bridge.requiredRoles -}}
+{{- else -}}
+{{- .Values.bridge.requiredRole -}}
+{{- end -}}
+{{- end -}}

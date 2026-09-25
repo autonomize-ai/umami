@@ -45,6 +45,7 @@
     "pretest": "pnpm build-db-client",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:bridge": "node --test bridge/test/tenancy.test.mjs bridge/test/tenant-isolation.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "seed-data": "tsx scripts/seed-data.ts",

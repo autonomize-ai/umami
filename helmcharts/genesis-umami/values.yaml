@@ -374,7 +374,76 @@ bridge:
   enabled: false
   port: 3001
   # Must match `requiredRoles` on the gateway's dashboard route.
+  #
+  # `requiredRole` is the original single role and is still honoured on its own.
+  # `requiredRoles`, when non-empty, replaces it -- tenant sign-in needs a
+  # second role admitted here, and a single-role re-check would refuse every
+  # tenant admin the gateway had just let through.
   requiredRole: "platform-admin"
+  requiredRoles: []
+  # Which admitted role becomes which Umami account at sign-in. A caller holding
+  # both is signed in as staff, which sees everything the tenant account can.
+  staffRole: "platform-admin"
+  tenantRole: "tenant-admin"
+
+  # ---------------------------------------------------------------------------
+  # Tenant isolation: one Umami team per organisation, holding one website per
+  # platform app. Umami enforces the walls itself -- a team-owned site is
+  # visible only to that team's members.
+  # ---------------------------------------------------------------------------
+  # The reconciler: a loop in this process that long-polls genesis-authz's org
+  # list and keeps every org's team and sites in place. Also enables the
+  # `{ chart }` form of /provision, where the bridge derives the per-org site id
+  # so no app re-implements the hash.
+  #
+  # Needs routeRegistration.enabled: it reuses that block's authz URL and
+  # internal key (the same key genesis-provisioner sends to this endpoint).
+  reconcile:
+    enabled: false
+    # How long authz may hold one org-list call open waiting for a change.
+    pollIntervalSeconds: 30
+    # MUST be greater than pollIntervalSeconds, or the client gives up the
+    # instant before authz answers and every long-poll fails. Enforced at render.
+    requestTimeoutSeconds: 45
+    # Floor between passes, so an authz that ignores `wait` cannot make the loop
+    # spin. A real change is still picked up within this long.
+    minIntervalSeconds: 5
+    # The host every site id is seeded with. Empty mirrors
+    # genesis-lib.singleDomainHost exactly (global.routing.host, else
+    # "ai-studio.<global.domain>"), which is what genesis-fe hashed its existing
+    # site with. Override only if you know both sides agree: a different string
+    # is a different hash, and every app then writes to sites that do not exist.
+    platformHost: ""
+    # Which field of authz's org list is the org id. The list carries BOTH `id`
+    # and `keycloak_id`, and they differ. It must be the one the gateway stamps
+    # as X-Organization-Id. CONFIRM against a live /verify response.
+    orgIdField: "keycloak_id"
+    # The apps every organisation gets a site for, up front. `chart` must be
+    # the app's chart name exactly -- it is part of the site id.
+    # Marketplace apps do NOT belong here: they are installed per org, and keep
+    # self-provisioning through /provision as before.
+    #
+    # Read even with `enabled: false`: it also drives /provision { chart },
+    # which the platform apps call wherever Umami runs. Empty there means the
+    # bridge answers 503 and those apps render no tracker.
+    platformApps: []
+    # - { chart: genesis-fe,          name: "AI Studio" }
+    # - { chart: genesis-cc-fe,       name: "Command Center" }
+    # - { chart: genesis-tenant-mgmt, name: "Admin Console" }
+
+  # Sign a tenant admin in as their org's own Umami user (global `view-only`,
+  # `team-view-only` in the org's team) instead of the shared staff account.
+  #
+  # Reachable only once the gateway's umami-dashboard route admits tenantRole,
+  # and `requiredRoles` above must include it too (enforced at render).
+  tenantSignIn:
+    enabled: false
+    # The key tenant-user passwords are derived from, as a key in the staff
+    # Secret. Empty derives them from the app secret (APP_SECRET), so no new
+    # vault entry is needed. They are HMACs with a purpose prefix, so this does
+    # not weaken APP_SECRET; rotating it just makes the bridge re-apply each
+    # tenant password on that tenant's next sign-in.
+    passwordSecretKey: ""
   # Declare this app's paths to genesis-authz at startup.
   #
   # That service default-denies any URI it does not recognise, so without this
