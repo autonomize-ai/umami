@@ -139,8 +139,12 @@ spec:
               value: {{ .Values.staffSetup.timeout | default 120 | quote }}
             - name: FAIL_ON_ERROR
               value: {{ .Values.staffSetup.failOnError | default false | quote }}
+            {{- /* NOT `| default true`: Sprig's default treats `false` as empty,
+                   so that form rendered "true" whatever the values said and
+                   adoption could never be switched off. hasKey keeps the
+                   true-when-absent behaviour and honours an explicit false. */}}
             - name: ADOPT_WEBSITES
-              value: {{ .Values.staffSetup.adoptWebsites | default true | quote }}
+              value: {{ ternary .Values.staffSetup.adoptWebsites true (hasKey .Values.staffSetup "adoptWebsites") | toString | quote }}
             - name: UMAMI_ADMIN_USER
               value: {{ .Values.staffSetup.adminUser | quote }}
             - name: UMAMI_ADMIN_PASSWORD

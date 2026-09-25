@@ -952,3 +952,180 @@ tests:
       - lengthEqual:
           path: spec.template.spec.containers
           count: 1
+
+  # ---------------------------------------------------------------------------
+  # Tenant isolation. Both halves are default-off, and every misconfiguration
+  # that would fail SILENTLY at runtime fails the render instead.
+  # ---------------------------------------------------------------------------
+  - it: renders no tenant-isolation settings while both halves are off
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_RECONCILE_ENABLED")]
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_TENANT_SIGNIN_ENABLED")]
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_REQUIRED_ROLES")].value
+          value: platform-admin
+
+  - it: renders the reconciler with the platform host taken from global.routing.host
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      global.routing.host: genesis.dev.autonomize.ai
+      bridge.enabled: true
+      bridge.reconcile.enabled: true
+      bridge.reconcile.platformApps:
+        - { chart: genesis-fe, name: "AI Studio" }
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_PLATFORM_HOST")].value
+          value: genesis.dev.autonomize.ai
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_PLATFORM_APPS")].value
+          value: '[{"chart":"genesis-fe","name":"AI Studio"}]'
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_RECONCILE_ORG_ID_FIELD")].value
+          value: keycloak_id
+
+  # The platform apps call /provision { chart } wherever Umami runs. Without the
+  # host and app list the bridge answers 503 and the app renders no tracker, so
+  # they must not depend on either half being switched on.
+  - it: renders the platform host and app list for /provision with both halves off
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      global.routing.host: genesis.dev.autonomize.ai
+      bridge.enabled: true
+      bridge.reconcile.platformApps:
+        - { chart: genesis-fe, name: "AI Studio" }
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_PLATFORM_HOST")].value
+          value: genesis.dev.autonomize.ai
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_PLATFORM_APPS")].value
+          value: '[{"chart":"genesis-fe","name":"AI Studio"}]'
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_RECONCILE_ENABLED")]
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_TENANT_SIGNIN_ENABLED")]
+
+  # Must stay identical to genesis-lib.singleDomainHost: genesis-fe seeded its
+  # existing site id with that helper, and a different host is a different hash.
+  - it: falls back to the same host genesis-lib.singleDomainHost would produce
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      global.domain: example.io
+      bridge.enabled: true
+      bridge.reconcile.enabled: true
+      bridge.reconcile.platformApps:
+        - { chart: genesis-fe, name: "AI Studio" }
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_PLATFORM_HOST")].value
+          value: ai-studio.example.io
+
+  - it: refuses a request timeout that does not exceed the poll wait
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+      bridge.reconcile.enabled: true
+      bridge.reconcile.requestTimeoutSeconds: 30
+      bridge.reconcile.platformApps:
+        - { chart: genesis-fe, name: "AI Studio" }
+    template: templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "requestTimeoutSeconds .* must be greater than pollIntervalSeconds"
+
+  - it: refuses the reconciler with no platform apps
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+      bridge.reconcile.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "platformApps is empty"
+
+  - it: refuses the reconciler without route registration, whose authz key it reuses
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+      bridge.routeRegistration.enabled: false
+      bridge.reconcile.enabled: true
+      bridge.reconcile.platformApps:
+        - { chart: genesis-fe, name: "AI Studio" }
+    template: templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "needs bridge.routeRegistration.enabled"
+
+  - it: refuses tenant sign-in when the bridge would not admit the tenant role
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+      bridge.tenantSignIn.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "does not include tenantRole"
+
+  - it: derives tenant passwords from the app secret unless told otherwise
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      app.existingSecret: ai-studio-secrets
+      app.existingSecretKey: UMAMI_APP_SECRET
+      bridge.enabled: true
+      bridge.requiredRoles: [platform-admin, tenant-admin]
+      bridge.tenantSignIn.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_REQUIRED_ROLES")].value
+          value: platform-admin,tenant-admin
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_TENANT_PASSWORD_SECRET")].valueFrom.secretKeyRef
+          value:
+            name: ai-studio-secrets
+            key: UMAMI_APP_SECRET
+
+  # `| default true` treated an explicit false as empty, so adoption could not
+  # be switched off. Tenant isolation needs it off: adoption moves a site onto
+  # a user id, and a user-owned site never reaches Umami's team check.
+  - it: adopts websites by default
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="ADOPT_WEBSITES")].value
+          value: "true"
+
+  - it: honours adoptWebsites false
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
+      staffSetup.adoptWebsites: false
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="ADOPT_WEBSITES")].value
+          value: "false"
