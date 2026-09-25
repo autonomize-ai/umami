@@ -75,7 +75,7 @@ spec:
                  so the Job could not be created on any environment that took
                  the umbrella's default, and the Keycloak client the gateway's
                  dashboard route needs was never provisioned. */}}
-          image: {{ dig "initImage" "" (.Values.global | default dict) | default (printf "%s/curl:8.5.0" (include "umami.imageRegistry" .)) }}
+          image: {{ dig "initImage" "" (.Values.global | default dict) | default (printf "%s/chainguard/curl:cve-3.12.2" (include "umami.imageRegistry" .)) }}
           command: ["sh", "/scripts/keycloak-setup.sh"]
           env:
             - name: KC_URL
