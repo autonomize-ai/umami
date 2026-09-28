@@ -670,17 +670,10 @@ tests:
       staffSetup.enabled: true
     template: templates/staff-setup-job.yaml
     asserts:
-      # Pin the name at this index too. The assertion below is positional, and
-      # the index has already moved once when a variable was inserted above it
-      # -- without this, that shift shows up as a confusing regex failure
-      # against some unrelated value rather than "the order changed".
-      - equal:
-          path: spec.template.spec.containers[0].env[4].name
-          value: STAFF_ID
       # Umami validates this strictly and rejects anything merely uuid-shaped,
       # so the version ('4') and variant ('a') characters are load-bearing.
       - matchRegex:
-          path: spec.template.spec.containers[0].env[4].value
+          path: spec.template.spec.containers[0].env[?(@.name=="STAFF_ID")].value
           pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$"
 
   - it: runs the login bridge as a sidecar on the same image
@@ -891,43 +884,18 @@ tests:
           path: spec.template.spec.initContainers[0].image
           value: myregistry.example.com/curl:9.9
 
-  # Umami applies isAdmin in two places and only one is a bypass:
-  # canViewWebsite() returns true for an admin, but getUserWebsites() is
-  # `where: { userId }` with no role check. The Websites page calls
-  # /users/{id}/websites without `includeTeams`, so ONLY ownership puts a site
-  # on that page. An admin that skipped adoption could open any site by id and
-  # still saw "No data available" on the list -- which is what dev shipped.
-  - it: adopts sites onto the account itself when the staff role is admin
+  # The staff account is always a Umami admin: it opens every org's site with
+  # no team, so the script never creates a staff team or moves any site.
+  - it: provisions the staff account as admin and never moves sites
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
       staffSetup.enabled: true
-      staffSetup.role: admin
     template: templates/staff-setup-configmap.yaml
     asserts:
-      # userId, not teamId: the transfer endpoint sets teamId null and userId
-      # to this account, which is the column getUserWebsites matches on.
-      - matchRegex:
+      - notMatchRegex:
           path: data["staff-setup.sh"]
-          pattern: 'userId\\":\\"\$\{STAFF_ID\}'
-      - matchRegex:
-          path: data["staff-setup.sh"]
-          pattern: "adopting sites onto the account"
-
-  - it: keeps the team route for a non-admin role, which must not own sites
-    set:
-      enabled: true
-      database.external.url: "postgresql://u:p@h:5432/d"
-      staffSetup.enabled: true
-      staffSetup.role: view-only
-    template: templates/staff-setup-configmap.yaml
-    asserts:
-      - matchRegex:
-          path: data["staff-setup.sh"]
-          pattern: 'teamId\\":\\"\$\{TEAM_ID\}'
-      - matchRegex:
-          path: data["staff-setup.sh"]
-          pattern: "team-view-only"
+          pattern: "/transfer|/api/teams"
 
   # The provisioning path is how an app asks for its own analytics site without
   # ever holding a Umami credential. It is answered by the bridge, so the bridge
@@ -1017,8 +985,8 @@ tests:
       - notExists:
           path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_TENANT_SIGNIN_ENABLED")]
 
-  # Must stay identical to genesis-lib.singleDomainHost: genesis-fe seeded its
-  # existing site id with that helper, and a different host is a different hash.
+  # The environment's public host, the same value genesis-lib.singleDomainHost
+  # gives. Part of every org's site id, so it must never drift.
   - it: falls back to the same host genesis-lib.singleDomainHost would produce
     set:
       enabled: true
@@ -1104,10 +1072,7 @@ tests:
             name: ai-studio-secrets
             key: UMAMI_APP_SECRET
 
-  # `| default true` treated an explicit false as empty, so adoption could not
-  # be switched off. Tenant isolation needs it off: adoption moves a site onto
-  # a user id, and a user-owned site never reaches Umami's team check.
-  - it: adopts websites by default
+  - it: runs the staff account as admin, with no team and no adoption settings
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
@@ -1115,17 +1080,9 @@ tests:
     template: templates/staff-setup-job.yaml
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].env[?(@.name=="ADOPT_WEBSITES")].value
-          value: "true"
-
-  - it: honours adoptWebsites false
-    set:
-      enabled: true
-      database.external.url: "postgresql://u:p@h:5432/d"
-      staffSetup.enabled: true
-      staffSetup.adoptWebsites: false
-    template: templates/staff-setup-job.yaml
-    asserts:
-      - equal:
-          path: spec.template.spec.containers[0].env[?(@.name=="ADOPT_WEBSITES")].value
-          value: "false"
+          path: spec.template.spec.containers[0].env[?(@.name=="STAFF_ROLE")].value
+          value: admin
+      - notExists:
+          path: spec.template.spec.containers[0].env[?(@.name=="ADOPT_WEBSITES")]
+      - notExists:
+          path: spec.template.spec.containers[0].env[?(@.name=="TEAM_NAME")]

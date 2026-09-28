@@ -11,24 +11,12 @@ data:
     #!/bin/sh
     set -e
 
-    # Provision the read-only staff identity the login bridge signs people in as.
+    # Provision the staff identity the login bridge signs platform admins in as.
     #
-    # WHY A TEAM IS NOT OPTIONAL
-    #
-    # Umami's view permission resolves ownership in order (src/permissions/website.ts):
-    #
-    #   if (entity.userId) return user.id === entity.userId;
-    #   if (entity.teamId) return isMemberOf(entity.teamId);
-    #
-    # A site created by the admin account carries userId = admin, so the teamId
-    # branch is NEVER REACHED for it. Adding a user to a team alongside such a
-    # site grants nothing at all. The sites have to be genuinely TRANSFERRED,
-    # which is what step 4 does.
-    #
-    # And the global `view-only` role grants no read access either --
-    # ROLE_PERMISSIONS['view-only'] is the empty list; it only removes write
-    # permissions. Team membership is the entire source of this account's
-    # visibility. Both halves are required.
+    # The account is a Umami ADMIN. canViewWebsite starts with
+    # `if (user.isAdmin) return true`, so it can open every organisation's site
+    # without being in any team, and Admin -> Websites lists them all. Each
+    # site stays in its own org's team: nothing here moves or adopts sites.
     #
     # Idempotent throughout: safe on every pod start, which is when it runs.
 
@@ -75,13 +63,9 @@ data:
     AUTH="Authorization: Bearer ${TOKEN}"
 
     # -- JSON parsing --------------------------------------------------
-    # via node, not sed. These responses are NESTED -- a team carries a
-    # `members[]` array whose rows have their own `id`, and a website list
-    # embeds its owning `user`. A greedy `sed 's/.*"id":"\([^"]*\)".*/\1/'`
-    # takes the LAST match on the line, so it silently returns a membership-row
-    # id where a team id was wanted, and a user id where a website id was.
-    # Both were observed on k3d: the script reported success, created a second
-    # team on every run, and tried to "adopt" the admin user as a website.
+    # via node, not sed. Umami's responses are NESTED, and a greedy
+    # `sed 's/.*"id":"\([^"]*\)".*/\1/'` takes the LAST match on the line, so it
+    # silently returns a nested row's id where the top-level one was wanted.
     #
     # node is already in this image (it IS the umami image), so there is no new
     # dependency and no jq to vendor.
@@ -94,16 +78,8 @@ data:
             const parsed = JSON.parse(raw);
             const rows = Array.isArray(parsed) ? parsed : (parsed.data || []);
             const [mode, arg] = process.argv.slice(1);
-            if (mode === "teamIdByName") {
-              const hit = rows.find(t => t.name === arg);
-              process.stdout.write(hit ? hit.id : "");
-            } else if (mode === "ownIds") {
-              // Top-level ids only. Never descends into nested objects.
-              process.stdout.write(rows.map(r => r.id).filter(Boolean).join("\n"));
-            } else if (mode === "role") {
+            if (mode === "role") {
               process.stdout.write(parsed && parsed.role ? parsed.role : "");
-            } else if (mode === "hasUser") {
-              process.stdout.write(rows.some(r => r.userId === arg || (r.user && r.user.id === arg)) ? "yes" : "");
             } else if (mode === "id") {
               process.stdout.write(parsed && parsed.id ? parsed.id : "");
             } else if (mode === "present") {
@@ -116,7 +92,7 @@ data:
       ' "$1" "$2"
     }
 
-    # -- Step 2: the read-only account -----------------------------------
+    # -- Step 2: the staff account -----------------------------------
     # POST /api/users accepts an optional `id`, so this one is deterministic
     # (computed by the chart from the release).
     #
@@ -127,12 +103,10 @@ data:
     USER_PRESENT=$(curl -s "${UMAMI_URL}/api/users/${STAFF_ID}" -H "${AUTH}" | jsonpath present)
 
     if [ -n "${USER_PRESENT}" ]; then
-      # Reconcile the role rather than assuming it. This script is desired-state
-      # and runs on every deploy, so an account created under an earlier value
-      # of staffSetup.role must be corrected -- otherwise changing that value in
-      # config appears to work and silently does nothing. Caught exactly that
-      # way on k3d: the account stayed view-only after the value moved to admin.
-      # Reconcile role AND password on every run, unconditionally.
+      # Reconcile the role rather than assuming it: an account left at any
+      # other role (created by an older chart, or edited by hand) is put back
+      # to admin. Role AND password are reconciled on every run,
+      # unconditionally.
       #
       # The password matters more than it looks. It lives in the platform
       # secret, and the bridge authenticates to Umami with it. Rotating that
@@ -162,110 +136,6 @@ data:
         -H "${AUTH}" -H "Content-Type: application/json" \
         -d "{\"id\":\"${STAFF_ID}\",\"username\":\"${STAFF_USER}\",\"password\":\"${STAFF_PASSWORD}\",\"role\":\"${STAFF_ROLE}\"}" \
         > /dev/null && echo "Created." || echo "WARNING: create failed."
-    fi
-
-    # -- Step 3 & 4: team, membership, site adoption ---------------------
-    #
-    # An admin account needs NO team, but it does still need the sites moved
-    # onto it, and that distinction is easy to get wrong -- this script got it
-    # wrong and shipped an empty Websites page to dev.
-    #
-    # Umami applies isAdmin in two different places, and only one of them is
-    # a bypass:
-    #
-    #   permissions/website.ts  canViewWebsite()  -> `if (user.isAdmin) return true`
-    #   queries/prisma/website  getUserWebsites() -> `where: { userId }`, no role check
-    #
-    # So an admin can OPEN any site it knows the id of, but the Websites LIST
-    # is scoped to ownership for every role. The page calls
-    # /users/{id}/websites without `includeTeams` (WebsitesDataTable passes no
-    # params), so team membership does not put a site on that page either --
-    # only ownership does. An admin therefore lands on "No data available"
-    # while holding permission to view every one of them.
-    #
-    # Hence: admins skip the team and take the sites onto their own user id;
-    # non-admins keep the team, because ownership would hand a restricted role
-    # owner rights on the site.
-    if [ "${STAFF_ROLE}" = "admin" ]; then
-      echo "Account is admin -- skipping team, adopting sites onto the account."
-
-      if [ "${ADOPT_WEBSITES}" = "true" ]; then
-        # Lists what the CALLER owns, i.e. the sites each app's provisioning
-        # container created as admin. Once transferred they leave this list,
-        # so re-running is a no-op.
-        IDS=$(curl -sf "${UMAMI_URL}/api/websites?pageSize=200" -H "${AUTH}" | jsonpath ownIds)
-
-        if [ -z "${IDS}" ]; then
-          echo "No admin-owned sites to adopt."
-        else
-          for SITE in ${IDS}; do
-            # userId, not teamId: the transfer endpoint sets teamId null and
-            # userId to this account, which is what getUserWebsites matches on.
-            curl -sf -X POST "${UMAMI_URL}/api/websites/${SITE}/transfer" \
-              -H "${AUTH}" -H "Content-Type: application/json" \
-              -d "{\"userId\":\"${STAFF_ID}\"}" \
-              > /dev/null 2>&1 && echo "Adopted site ${SITE}." || echo "WARNING: could not adopt ${SITE}."
-          done
-        fi
-      fi
-
-      echo "=== Umami staff access setup complete ==="
-      exit 0
-    fi
-
-    # -- The team, and membership ----------------------------------------
-    # POST /api/teams generates its own uuid and takes no `id`, so the team is
-    # found by name rather than addressed directly.
-    TEAM_ID=$(curl -sf "${UMAMI_URL}/api/teams?pageSize=200" -H "${AUTH}" | jsonpath teamIdByName "${TEAM_NAME}")
-
-    if [ -z "${TEAM_ID}" ]; then
-      echo "Creating team '${TEAM_NAME}'..."
-      TEAM_ID=$(curl -sf -X POST "${UMAMI_URL}/api/teams" \
-        -H "${AUTH}" -H "Content-Type: application/json" \
-        -d "{\"name\":\"${TEAM_NAME}\"}" | jsonpath id)
-    fi
-
-    if [ -z "${TEAM_ID}" ]; then
-      echo "ERROR: no team id resolved."
-      [ "${FAIL_ON_ERROR}" = "true" ] && exit 1
-      exit 0
-    fi
-    echo "Team id: ${TEAM_ID}"
-
-    # Membership is CHECKED before adding, not attempted-and-ignored.
-    # Umami does not reject a duplicate add -- it inserts a second team_user
-    # row -- so "try and swallow the error" silently grows one row per run
-    # forever. Observed on k3d: two rows after two runs.
-    ALREADY=$(curl -sf "${UMAMI_URL}/api/teams/${TEAM_ID}/users?pageSize=200" -H "${AUTH}" \
-      | jsonpath hasUser "${STAFF_ID}")
-
-    if [ -n "${ALREADY}" ]; then
-      echo "Account already in team."
-    else
-      curl -sf -X POST "${UMAMI_URL}/api/teams/${TEAM_ID}/users" \
-        -H "${AUTH}" -H "Content-Type: application/json" \
-        -d "{\"userId\":\"${STAFF_ID}\",\"role\":\"team-view-only\"}" \
-        > /dev/null && echo "Added account to team." || echo "WARNING: could not add account to team."
-    fi
-
-    # -- Adopt the app sites ---------------------------------------------
-    # GET /api/websites returns only the sites the CALLER owns, so this lists
-    # exactly the ones each app's provisioning container created as admin and
-    # that therefore still resolve on canViewWebsite's userId branch. Once
-    # transferred they drop out of this list, which makes re-running a no-op.
-    if [ "${ADOPT_WEBSITES}" = "true" ]; then
-      IDS=$(curl -sf "${UMAMI_URL}/api/websites?pageSize=200" -H "${AUTH}" | jsonpath ownIds)
-
-      if [ -z "${IDS}" ]; then
-        echo "No admin-owned sites to adopt."
-      else
-        for SITE in ${IDS}; do
-          curl -sf -X POST "${UMAMI_URL}/api/websites/${SITE}/transfer" \
-            -H "${AUTH}" -H "Content-Type: application/json" \
-            -d "{\"teamId\":\"${TEAM_ID}\"}" \
-            > /dev/null 2>&1 && echo "Adopted site ${SITE}." || echo "WARNING: could not adopt ${SITE}."
-        done
-      fi
     fi
 
     echo "=== Umami staff access setup complete ==="

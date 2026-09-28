@@ -2,12 +2,10 @@
 //
 //   node --test bridge/test/
 //
-// The vectors below are not invented. They were rendered from the genesis-fe
-// chart's own `genesis-fe.umamiWebsiteId` helper (vendored genesis-fe-1.1.1983)
-// with `--set global.routing.host=<host>`, and read back from the rendered
-// NEXT_PUBLIC_UMAMI_WEBSITE_ID. If the bridge's hash ever drifts from the
-// helper's, the existing per-environment site stops being addressable and
-// logged-out traffic lands nowhere — silently. These tests are the tripwire.
+// The site-id vectors below are not invented: they are the ids a live
+// reconcile created on a genesis-local cluster for two sample orgs. If the
+// hash ever drifts, every existing org site stops being addressable and events
+// land nowhere -- silently. These tests are the tripwire.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -29,9 +27,18 @@ import {
 const ORG = '7f3a1c94-2b8e-4d51-9a06-c3e5d8f21b47';
 const OTHER_ORG = '11111111-2222-4333-8444-555555555555';
 
-test('without an org, siteIdFor reproduces the genesis-fe Helm helper exactly', () => {
-  assert.equal(siteIdFor('genesis.dev.autonomize.ai', 'genesis-fe'), 'c5fb70e5-a0dc-4434-ae05-2999cde078bd');
-  assert.equal(siteIdFor('genesis.localhost', 'genesis-fe'), 'ea2dcb7b-f77b-46bc-af46-365f92eb6a99');
+test('siteIdFor reproduces the ids a live reconcile created', () => {
+  const acme = 'f16d3ca9-dbf2-4e74-b878-d140e9a47629';
+  const bravo = '9039805f-a885-4c16-a8f2-cd36082e208b';
+  assert.equal(siteIdFor('genesis.localhost', 'genesis-fe', acme), '76037c8c-a0c3-40b0-a368-5fb64ee642a1');
+  assert.equal(siteIdFor('genesis.localhost', 'genesis-tenant-mgmt', acme), '33ba5487-4856-4245-a686-9d5740d12b4b');
+  assert.equal(siteIdFor('genesis.localhost', 'genesis-cc-fe', bravo), 'ae4e04a3-0c4c-4ec5-a00b-433a9acd52a8');
+});
+
+test('there is no site without an org', () => {
+  // Every site belongs to one org's team; an org-less id would be a shared site.
+  assert.throws(() => siteIdFor('genesis.dev.autonomize.ai', 'genesis-fe'), /org id/);
+  assert.throws(() => siteIdFor('genesis.dev.autonomize.ai', 'genesis-fe', ''), /org id/);
 });
 
 test('per-org site ids are valid uuids, stable, and distinct per org and per app', () => {
@@ -40,8 +47,7 @@ test('per-org site ids are valid uuids, stable, and distinct per org and per app
   assert.equal(a, siteIdFor('genesis.dev.autonomize.ai', 'genesis-fe', ORG), 'same inputs, same id');
   assert.notEqual(a, siteIdFor('genesis.dev.autonomize.ai', 'genesis-fe', OTHER_ORG), 'org changes the id');
   assert.notEqual(a, siteIdFor('genesis.dev.autonomize.ai', 'genesis-cc-fe', ORG), 'app changes the id');
-  assert.notEqual(a, siteIdFor('genesis.dev.autonomize.ai', 'genesis-fe'), 'org-scoped differs from unscoped');
-  // Version and variant characters are forced, as the helper forces them.
+  // Version and variant characters are forced, for Umami's strict uuid check.
   assert.equal(a[14], '4');
   assert.equal(a[19], 'a');
 });
@@ -83,7 +89,7 @@ test('a renamed org still maps to the same team', () => {
 });
 
 test('names not ending in an org id are not claimed', () => {
-  assert.equal(orgIdFromTeamName('Genesis Staff'), null);
+  assert.equal(orgIdFromTeamName('Some Other Team'), null);
   assert.equal(orgIdFromTeamName(''), null);
   assert.equal(orgIdFromTeamName(null), null);
 });

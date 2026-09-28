@@ -266,7 +266,7 @@ after(() => {
 // --- tests -----------------------------------------------------------------
 
 test('the reconciler gives every org one team holding one team-owned site per platform app', async () => {
-  await waitFor(() => state.websites.size >= 2 * APPS.length + APPS.length, 'reconcile to create all sites');
+  await waitFor(() => state.websites.size >= 2 * APPS.length, 'reconcile to create all sites');
 
   for (const [orgId, name] of [[ORG_A, 'Acme'], [ORG_B, 'Bravo']]) {
     const team = teamOf(orgId);
@@ -283,12 +283,12 @@ test('the reconciler gives every org one team holding one team-owned site per pl
   assert.match(bridgeLog, /reconcile_once done: orgs=2/);
 });
 
-test('the reconciler keeps an unscoped, staff-owned site per app for logged-out traffic', async () => {
-  for (const app of APPS) {
-    const site = state.websites.get(siteIdFor(HOST, app.chart));
-    assert.ok(site, `unscoped ${app.chart}`);
-    assert.equal(site.teamId, null);
-    assert.equal(site.userId, STAFF.id);
+test('the reconciler creates no site outside an org team', async () => {
+  // There is no shared site: exactly one site per org per app, all team-owned.
+  assert.equal(state.websites.size, 2 * APPS.length);
+  for (const site of state.websites.values()) {
+    assert.ok(site.teamId, `site ${site.id} has no team`);
+    assert.equal(site.userId, null);
   }
 });
 

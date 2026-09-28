@@ -18,15 +18,11 @@ export const UUID_RE =
  * Hash a seed into the 8-4-4-4-12 shape, with the version ('4') and variant
  * ('a') characters forced so Umami's strict uuid validation accepts it.
  *
- * BYTE-FOR-BYTE the same slicing as the genesis-fe chart's
- * `genesis-fe.umamiWebsiteId` helper:
+ * Characters 12 and 16 of the digest are replaced by the forced '4' and 'a'.
  *
- *   printf "%s-%s-4%s-a%s-%s" (substr 0 8 $h) (substr 8 12 $h)
- *                             (substr 13 16 $h) (substr 17 20 $h) (substr 20 32 $h)
- *
- * Characters 12 and 16 of the digest are skipped on purpose — the helper does,
- * so this must. The test suite pins this against values rendered from that
- * helper; change one and the other has to change in the same commit.
+ * FIXED FOREVER. Every org's site id comes out of this; change the slicing
+ * and every existing site stops being addressable, its history stranded. The
+ * test suite pins it against ids a live reconcile created.
  */
 export function uuidFromSeed(seed) {
   const h = createHash('sha256').update(seed).digest('hex');
@@ -34,22 +30,18 @@ export function uuidFromSeed(seed) {
 }
 
 /**
- * The analytics site id for one app, optionally scoped to one organisation.
+ * The analytics site id for one app of one organisation: seed
+ * `${host}/${chart}/${orgId}`. Every site belongs to exactly one org -- there
+ * is no org-less, shared site -- so the org is required.
  *
- * Without an org this reproduces the existing per-environment id exactly
- * (seed `${host}/${chart}`), which is how the old shared site stays
- * addressable — it becomes the staff-only archive and the destination for
- * logged-out traffic. With an org, the org id is one more path segment on the
- * same seed, so every tenant gets its own site from the same single deployment.
- *
- * `host` must be the SAME string genesis-lib.singleDomainHost produces
- * (global.routing.host). A different spelling of the same host — a trailing
- * slash, a scheme, a service DNS name — is a different hash and a different
- * site.
+ * `host` is the environment's public host (global.routing.host) and must stay
+ * the same string for the life of the environment. A different spelling of
+ * the same host -- a trailing slash, a scheme, a service DNS name -- is a
+ * different hash and a different site.
  */
 export function siteIdFor(host, chart, orgId) {
-  if (!host || !chart) throw new Error('siteIdFor needs a host and a chart name');
-  return uuidFromSeed(orgId ? `${host}/${chart}/${orgId}` : `${host}/${chart}`);
+  if (!host || !chart || !orgId) throw new Error('siteIdFor needs a host, a chart name and an org id');
+  return uuidFromSeed(`${host}/${chart}/${orgId}`);
 }
 
 /**

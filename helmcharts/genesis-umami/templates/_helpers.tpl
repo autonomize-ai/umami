@@ -345,12 +345,13 @@ Override staffSetup.userId to pin an exact value.
 {{/*
   umami.platformHost — the host every tenant-isolation site id is seeded with.
 
-  MIRRORS genesis-lib.singleDomainHost EXACTLY (global.routing.host, else
-  "ai-studio.<global.domain | default local.dev>"). This chart does not depend
-  on genesis-lib -- it also renders standalone -- so it cannot call that helper,
-  and the copy has to stay byte-identical: genesis-fe seeded its existing site
-  id with that helper's output, and a different host string here is a different
-  hash, so every app would write to sites that do not exist, silently.
+  The environment's public host, the same value genesis-lib.singleDomainHost
+  gives (global.routing.host, else "ai-studio.<global.domain | default
+  local.dev>"). This chart does not depend on genesis-lib -- it also renders
+  standalone -- so it cannot call that helper. Only the bridge computes site
+  ids, but the value must stay the same for the life of an environment: a
+  different host string is a different hash, so every org's existing site
+  would stop being addressable, silently.
 
   `dig` rather than direct paths, because .Values.global is nil standalone.
   bridge.reconcile.platformHost overrides it for the rare case both sides are

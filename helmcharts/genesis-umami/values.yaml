@@ -273,31 +273,18 @@ redis:
 # event collection, and the dashboard turns on when its values say so.
 staffSetup:
   enabled: false
-  # Display name of the team. Looked up by name because POST /api/teams mints
-  # its own uuid and accepts no id.
-  teamName: "Genesis Staff"
   username: "genesis-platform-staff"
-  # Umami role for that account.
-  #
-  # `admin` by default, so a platform admin arriving through the bridge can do
-  # real work: save funnels and retention reports, organise boards, manage
-  # teams. Umami offers no role that permits those while withholding site
+  # The account is always a Umami `admin`: it opens every organisation's site
+  # without joining any team, so each site stays in its own org's team. That
+  # also lets a platform admin do real work -- funnels, retention reports,
+  # boards. Umami offers no role that permits those while withholding site
   # deletion -- every role above "nothing" carries websiteDelete -- so what is
   # refused is drawn at the bridge instead (bridge.blockedCalls), which now
   # covers reset only. Site deletion is permitted, deliberately; see that key.
   #
-  # Set to `view-only` for a strictly read-only posture. That account sees
-  # nothing on its own, so the team and site-adoption steps below become
-  # necessary; with `admin` they are skipped entirely.
-  role: "admin"
   # Pin an exact Umami user id. Leave EMPTY -- it is derived from the release
   # name (see umami.staffUserId) so it is stable across renders.
   userId: ""
-  # Adopt every admin-owned website into the team on each run. GET /api/websites
-  # returns only what the caller owns, so this picks up exactly the sites each
-  # app's provisioning container created and nothing else; once transferred they
-  # leave that list, which is what makes re-running a no-op.
-  adoptWebsites: true
   adminUser: "admin"
   # Defaults to app.existingSecret so these sit beside APP_SECRET rather than
   # adding a third Secret for two keys.
@@ -408,11 +395,10 @@ bridge:
     # Floor between passes, so an authz that ignores `wait` cannot make the loop
     # spin. A real change is still picked up within this long.
     minIntervalSeconds: 5
-    # The host every site id is seeded with. Empty mirrors
-    # genesis-lib.singleDomainHost exactly (global.routing.host, else
-    # "ai-studio.<global.domain>"), which is what genesis-fe hashed its existing
-    # site with. Override only if you know both sides agree: a different string
-    # is a different hash, and every app then writes to sites that do not exist.
+    # The host every site id is seeded with. Empty means the environment's
+    # public host (global.routing.host, else "ai-studio.<global.domain>").
+    # Must never change for an environment: a different string is a different
+    # hash, and every org's existing site stops being addressable.
     platformHost: ""
     # Which field of authz's org list is the org id. The list carries BOTH `id`
     # and `keycloak_id`, and they differ. It must be the one the gateway stamps
@@ -515,7 +501,7 @@ bridge:
   # signed in as the staff account for the dashboard hand-off -- creates the
   # site. Because Umami records the creator as the owner, the site belongs to
   # that account from the first moment and appears on the staff Websites page
-  # with no ownership transfer and no adoption sweep.
+  # with no ownership transfer.
   #
   # Deliberately create-only, and that is unchanged by the denylist above no
   # longer covering DELETE. Two different callers: staff reach the bridge from a

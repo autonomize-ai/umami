@@ -1571,14 +1571,14 @@ async function renameTeamIfNeeded(org, teamId) {
  *
  * `existing` is the row from an /api/admin/websites listing (or null when that
  * listing had no such site); leave it undefined to look the site up here.
- * `teamId` null means a staff-owned site in no team -- the unscoped site that
- * logged-out traffic lands in.
+ * Every site belongs to its org's team: there is no site outside a team.
  *
  * Created team-owned from the first moment: POST /api/websites sets userId only
  * when no teamId is given, and canViewWebsite returns on a set userId BEFORE it
  * ever looks at the team.
  */
 async function ensureSite(siteId, name, teamId, existing) {
+  if (!teamId) throw new Error(`site ${siteId}: every site belongs to an org's team`);
   let row = existing;
   if (row === undefined) {
     const body = await umamiGet(`/api/websites/${siteId}`);
@@ -1587,28 +1587,23 @@ async function ensureSite(siteId, name, teamId, existing) {
   }
 
   if (!row) {
-    await umamiSend('POST', '/api/websites', {
-      id: siteId,
-      name,
-      domain: RECONCILE.host,
-      ...(teamId ? { teamId } : {}),
-    });
+    await umamiSend('POST', '/api/websites', { id: siteId, name, domain: RECONCILE.host, teamId });
     counters.sitesCreated++;
-    log('site: created', siteId, JSON.stringify(name), teamId ? `in team ${teamId}` : '(no team)');
+    log('site: created', siteId, JSON.stringify(name), `in team ${teamId}`);
     return 'created';
   }
 
-  if (teamId && !row.teamId) {
-    // Exists but owned by a user -- made by an older path. The team branch of
-    // canViewWebsite is never reached for it, so the team would not see it.
-    // The transfer sets teamId and nulls userId in one write.
+  if (!row.teamId) {
+    // Exists but owned by a user rather than a team (created by hand, say).
+    // The team branch of canViewWebsite is never reached for it, so the team
+    // would not see it. The transfer sets teamId and nulls userId in one write.
     await umamiSend('POST', `/api/websites/${siteId}/transfer`, { teamId });
     counters.sitesMoved++;
     log('site: moved into its team', siteId, teamId);
     return 'moved';
   }
 
-  if (teamId && row.teamId !== teamId) {
+  if (row.teamId !== teamId) {
     // Never moved between teams automatically: that is moving one tenant's
     // data to another, and nothing here can know which placement is right.
     log('site:', siteId, 'is in team', row.teamId, 'not', teamId, '-- left alone; check by hand');
@@ -1642,18 +1637,6 @@ async function reconcileOnce(orgs) {
     } catch (err) {
       incomplete.push(org.id);
       log('reconcile: org', org.id, 'incomplete --', err.message);
-    }
-  }
-
-  // The unscoped site per app: the existing per-environment id, staff-owned,
-  // in no team. It holds the history from before the split and is where
-  // logged-out traffic (the login screen) lands. Visible to staff only.
-  for (const app of RECONCILE.apps) {
-    const siteId = siteIdFor(RECONCILE.host, app.chart);
-    try {
-      await ensureSite(siteId, app.name, null, sites.get(siteId) || null);
-    } catch (err) {
-      log('reconcile: unscoped site for', app.chart, 'failed --', err.message);
     }
   }
 
