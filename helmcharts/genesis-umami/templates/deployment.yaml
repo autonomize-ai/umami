@@ -170,6 +170,15 @@ spec:
               value: {{ trimSuffix "/" .Values.basePath | quote }}
             - name: BRIDGE_REQUIRED_ROLE
               value: {{ .Values.bridge.requiredRole | quote }}
+            {{- /* The list wins over the single role when set. Rendered as its
+                   own variable so a bridge image that predates it still reads
+                   BRIDGE_REQUIRED_ROLE above and keeps working. */}}
+            - name: BRIDGE_REQUIRED_ROLES
+              value: {{ include "umami.bridgeRequiredRoles" . | quote }}
+            - name: BRIDGE_STAFF_ROLE
+              value: {{ .Values.bridge.staffRole | default "platform-admin" | quote }}
+            - name: BRIDGE_TENANT_ROLE
+              value: {{ .Values.bridge.tenantRole | default "tenant-admin" | quote }}
             {{- if .Values.bridge.routeRegistration.enabled }}
             # genesis-authz default-denies unknown URIs, so this app's paths
             # must be declared or every request 403s before the gateway's role
@@ -230,6 +239,64 @@ spec:
                   name: {{ include "umami.staffSecretName" . }}
                   key: {{ .Values.staffSetup.passwordSecretKey | quote }}
                   optional: true
+            {{- /* Tenant isolation. Both halves render nothing unless switched on,
+                   and every misconfiguration that would fail SILENTLY at
+                   runtime fails the render here instead. */}}
+            {{- $reconcile := .Values.bridge.reconcile | default dict }}
+            {{- $tenant := .Values.bridge.tenantSignIn | default dict }}
+            {{- if $reconcile.enabled }}
+            {{- if not .Values.bridge.routeRegistration.enabled }}
+            {{- fail "genesis-umami: bridge.reconcile.enabled needs bridge.routeRegistration.enabled -- the reconciler reads the org list with that block's authz URL and internal key." }}
+            {{- end }}
+            {{- if not $reconcile.platformApps }}
+            {{- fail "genesis-umami: bridge.reconcile.enabled but bridge.reconcile.platformApps is empty -- list the platform apps every organisation gets a site for, e.g. { chart: genesis-fe, name: \"AI Studio\" }." }}
+            {{- end }}
+            {{- if le (int $reconcile.requestTimeoutSeconds) (int $reconcile.pollIntervalSeconds) }}
+            {{- fail (printf "genesis-umami: bridge.reconcile.requestTimeoutSeconds (%v) must be greater than pollIntervalSeconds (%v). authz holds each org-list call open for the poll interval, so a shorter client timeout fails every long-poll and the loop silently learns nothing." $reconcile.requestTimeoutSeconds $reconcile.pollIntervalSeconds) }}
+            {{- end }}
+            - name: BRIDGE_RECONCILE_ENABLED
+              value: "true"
+            - name: BRIDGE_RECONCILE_POLL_SECONDS
+              value: {{ $reconcile.pollIntervalSeconds | quote }}
+            - name: BRIDGE_RECONCILE_REQUEST_TIMEOUT_SECONDS
+              value: {{ $reconcile.requestTimeoutSeconds | quote }}
+            - name: BRIDGE_RECONCILE_MIN_INTERVAL_SECONDS
+              value: {{ $reconcile.minIntervalSeconds | default 5 | quote }}
+            - name: BRIDGE_RECONCILE_ORG_ID_FIELD
+              value: {{ $reconcile.orgIdField | default "keycloak_id" | quote }}
+            {{- end }}
+            {{- /* The host and app list drive both the loop and the { chart }
+                   form of /provision. They render whenever an app list is set,
+                   not only when a half is on: the platform apps call /provision
+                   wherever Umami runs, and without these the bridge answers 503
+                   and the app renders no tracker at all. */}}
+            {{- if or $reconcile.enabled $tenant.enabled $reconcile.platformApps }}
+            - name: BRIDGE_PLATFORM_HOST
+              value: {{ include "umami.platformHost" . | quote }}
+            - name: BRIDGE_PLATFORM_APPS
+              value: {{ toJson ($reconcile.platformApps | default list) | quote }}
+            {{- end }}
+            {{- if $tenant.enabled }}
+            {{- $roles := splitList "," (include "umami.bridgeRequiredRoles" .) }}
+            {{- if not (has ($.Values.bridge.tenantRole | default "tenant-admin") $roles) }}
+            {{- fail (printf "genesis-umami: bridge.tenantSignIn.enabled but bridge.requiredRoles (%s) does not include tenantRole %q -- the bridge would refuse every tenant admin the gateway admits. Add it to bridge.requiredRoles." (include "umami.bridgeRequiredRoles" .) ($.Values.bridge.tenantRole | default "tenant-admin")) }}
+            {{- end }}
+            - name: BRIDGE_TENANT_SIGNIN_ENABLED
+              value: "true"
+            - name: BRIDGE_TENANT_PASSWORD_SECRET
+              valueFrom:
+                secretKeyRef:
+                  {{- if $tenant.passwordSecretKey }}
+                  name: {{ include "umami.staffSecretName" . }}
+                  key: {{ $tenant.passwordSecretKey | quote }}
+                  {{- else if .Values.app.existingSecret }}
+                  name: {{ .Values.app.existingSecret | quote }}
+                  key: {{ .Values.app.existingSecretKey | quote }}
+                  {{- else }}
+                  name: {{ include "umami.fullname" . }}
+                  key: APP_SECRET
+                  {{- end }}
+            {{- end }}
           ports:
             - name: bridge
               containerPort: {{ .Values.bridge.port }}
