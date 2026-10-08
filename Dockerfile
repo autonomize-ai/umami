@@ -69,13 +69,14 @@ RUN adduser --system --uid 1001 nextjs
 # CVE-2026-14457, CVE-2026-18798, CVE-2026-54874, CVE-2026-63072,
 # CVE-2026-63075 and CVE-2026-63076. This is the only stage that ships, so it is
 # the only stage that needs the upgrade, and it has to precede the curl install
-# so libcurl resolves against the patched libssl3.
+# so libcurl resolves against the patched libssl3. zlib is upgraded the same
+# way: the base ships 1.3.2-r0 (CVE-2026-85091, HIGH) and v3.24/main has r1.
 #
 # Then bootstrap pnpm with the bundled npm and remove npm in the same layer, so
 # the vulnerable packages vendored inside the npm CLI are not shipped in the
 # final image. pnpm is the only package manager needed at build and runtime.
 RUN set -x \
-    && apk upgrade --no-cache libssl3 libcrypto3 \
+    && apk upgrade --no-cache libssl3 libcrypto3 zlib \
     && apk add --no-cache curl libc6-compat \
     && npm install -g pnpm@${PNPM_VERSION} \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
