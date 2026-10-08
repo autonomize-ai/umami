@@ -19,7 +19,8 @@ packages:
 # sharp 0.35.3 carries GHSA-rgj7-g3m4-5g8c (high, the bundled libheif), fixed
 # in 0.35.4. next declares sharp as an optional dependency at ^0.35.3, so
 # 0.35.4 already sits inside the range it asks for; the override only holds the
-# lockfile there so the patched build cannot drift back.
+# lockfile there so the patched build cannot drift back. 0.35.4 in turn carries
+# GHSA-wq5f-xc86-pv6w (high), fixed in 0.35.5.
 # caniuse-lite / electron-to-chromium are browserslist-database packages next
 # pulls in as loose transitive ranges, unrelated to the CVE-2026-94545 next fix
 # in this change. pnpm 11's minimumReleaseAge (24h) rejects whatever happens to
@@ -30,7 +31,7 @@ packages:
 overrides:
   deepmerge-ts: '^8.0.2'
   mysql2: '^3.23.1'
-  sharp: '^0.35.4'
+  sharp: '^0.35.5'
   caniuse-lite: '1.0.30001806'
   electron-to-chromium: '1.5.397'
 allowBuilds:
