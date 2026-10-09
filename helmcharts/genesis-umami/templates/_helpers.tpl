@@ -381,3 +381,24 @@ Override staffSetup.userId to pin an exact value.
 {{- .Values.bridge.requiredRole -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Pod tolerations for every pod this chart renders (umami + bridge Deployment,
+staff-setup Job, bundled PostgreSQL StatefulSet). Same contract as
+genesis-lib.tolerations for a cpu-class chart, without depending on genesis-lib:
+  1. A non-empty chart `tolerations` list wins outright.
+  2. Otherwise global.scheduling.tolerations (the environment's CPU list).
+  3. scheduling.inheritGlobalTolerations: false keeps this chart off that list.
+All Umami pods are CPU workloads, so global.scheduling.gpu.tolerations is never
+read. Renders nothing when no list applies.
+*/}}
+{{- define "genesis-umami.tolerations" -}}
+{{- $tolerations := .Values.tolerations -}}
+{{- if not $tolerations -}}
+{{- $scheduling := .Values.scheduling | default dict -}}
+{{- if or (not (hasKey $scheduling "inheritGlobalTolerations")) $scheduling.inheritGlobalTolerations -}}
+{{- $tolerations = ((.Values.global | default dict).scheduling | default dict).tolerations -}}
+{{- end -}}
+{{- end -}}
+{{- with $tolerations }}{{ toYaml . }}{{ end -}}
+{{- end -}}

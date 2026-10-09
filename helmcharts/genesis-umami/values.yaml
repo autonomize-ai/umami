@@ -595,5 +595,11 @@ securityContext:
     drop: ["ALL"]
 
 nodeSelector: {}
+# tolerations: a non-empty list here wins for every pod in this chart. Left
+# empty, the pods take the environment's global.scheduling.tolerations (all
+# Umami pods are CPU workloads; the GPU list is never used). Set
+# scheduling.inheritGlobalTolerations: false to keep them off that list.
 tolerations: []
+scheduling:
+  inheritGlobalTolerations: true
 affinity: {}
