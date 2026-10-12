@@ -1,0 +1,132 @@
+suite: Pod tolerations fall back to global.scheduling.tolerations (CPU list only)
+release:
+  name: genesis
+  namespace: genesis
+templates:
+  - templates/deployment.yaml
+  - templates/staff-setup-job.yaml
+  - templates/postgresql.yaml
+set:
+  enabled: true
+  staffSetup.enabled: true
+tests:
+  # With no list anywhere every pod renders exactly what it rendered before.
+  - it: renders no tolerations on any pod when neither the chart nor global sets any
+    asserts:
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/deployment.yaml
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/staff-setup-job.yaml
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/postgresql.yaml
+        documentSelector: {path: kind, value: StatefulSet}
+
+  - it: gives every pod the global CPU list when the chart sets none
+    set:
+      global.scheduling.tolerations:
+        - {key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}
+    asserts:
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}]
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}]
+        template: templates/staff-setup-job.yaml
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}]
+        template: templates/postgresql.yaml
+        documentSelector: {path: kind, value: StatefulSet}
+
+  - it: lets the chart's own list win over the global list
+    set:
+      tolerations:
+        - {key: team, operator: Equal, value: analytics, effect: NoSchedule}
+      global.scheduling.tolerations:
+        - {key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}
+    asserts:
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: team, operator: Equal, value: analytics, effect: NoSchedule}]
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: team, operator: Equal, value: analytics, effect: NoSchedule}]
+        template: templates/staff-setup-job.yaml
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: team, operator: Equal, value: analytics, effect: NoSchedule}]
+        template: templates/postgresql.yaml
+        documentSelector: {path: kind, value: StatefulSet}
+
+  - it: keeps every pod off the global list when the chart opts out
+    set:
+      scheduling.inheritGlobalTolerations: false
+      global.scheduling.tolerations:
+        - {key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}
+    asserts:
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/deployment.yaml
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/staff-setup-job.yaml
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/postgresql.yaml
+        documentSelector: {path: kind, value: StatefulSet}
+
+  - it: still renders the chart's own list when the chart opts out
+    set:
+      scheduling.inheritGlobalTolerations: false
+      tolerations:
+        - {key: team, operator: Equal, value: analytics, effect: NoSchedule}
+      global.scheduling.tolerations:
+        - {key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}
+    asserts:
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: team, operator: Equal, value: analytics, effect: NoSchedule}]
+        template: templates/deployment.yaml
+
+  # Umami pods are CPU workloads: the GPU list never reaches them.
+  - it: never gives a pod the GPU list
+    set:
+      global.scheduling.gpu.tolerations:
+        - {key: node, operator: Equal, value: gpu, effect: NoSchedule}
+    asserts:
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/deployment.yaml
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/staff-setup-job.yaml
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/postgresql.yaml
+        documentSelector: {path: kind, value: StatefulSet}
+
+  - it: takes only the CPU list when both global lists are set
+    set:
+      global.scheduling.tolerations:
+        - {key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}
+      global.scheduling.gpu.tolerations:
+        - {key: node, operator: Equal, value: gpu, effect: NoSchedule}
+    asserts:
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: nodepool, operator: Equal, value: ondemand, effect: NoSchedule}]
+        template: templates/deployment.yaml
+
+  - it: renders no tolerations when the global list is empty
+    set:
+      global.scheduling.tolerations: []
+    asserts:
+      - notExists:
+          path: spec.template.spec.tolerations
+        template: templates/deployment.yaml

@@ -38,6 +38,10 @@ spec:
     spec:
       securityContext:
         {{- toYaml .Values.postgresql.podSecurityContext | nindent 8 }}
+      {{- with include "genesis-umami.tolerations" . }}
+      tolerations:
+        {{- . | nindent 8 }}
+      {{- end }}
       containers:
         - name: postgresql
           image: {{ include "umami.image" (dict "img" .Values.postgresql.image) | quote }}
