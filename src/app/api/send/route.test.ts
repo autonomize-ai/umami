@@ -7,7 +7,7 @@ process.env.APP_SECRET = 'route-send-test-secret';
 import { isbot } from 'isbot';
 import clickhouse from '@/lib/clickhouse';
 import { CACHE_TOKEN_TYPE, EVENT_TYPE } from '@/lib/constants';
-import { secret } from '@/lib/crypto';
+import { getSalt, secret, uuid } from '@/lib/crypto';
 import { getClientInfo, hasBlockedIp } from '@/lib/detect';
 import { createToken, parseToken } from '@/lib/jwt';
 import { fetchWebsite } from '@/lib/load';
@@ -90,6 +90,23 @@ function callPOST(
       method: 'POST',
       headers,
     }),
+  );
+}
+
+function makeComputedSessionId(
+  sourceId: string,
+  timestamp = Math.floor(Date.now() / 1000),
+  distinctId?: string,
+) {
+  const createdAt = new Date(timestamp * 1000);
+  const sessionSalt = getSalt(process.env.SALT_ROTATION || 'month', createdAt);
+
+  return uuid(
+    sourceId,
+    defaultClientInfo.ip,
+    defaultClientInfo.userAgent,
+    sessionSalt,
+    distinctId ?? '',
   );
 }
 
@@ -507,17 +524,79 @@ describe('cache token handling', () => {
     );
   }
 
-  test('a valid cache token skips website lookup and session creation', async () => {
-    const token = makeCacheToken();
+  test('a valid cache token skips website lookup and session creation when it matches the computed session', async () => {
+    const timestamp = 1704067200;
+    const token = makeCacheToken({ sessionId: makeComputedSessionId(WEBSITE_ID, timestamp) });
 
     const response = await callPOST(
-      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/', timestamp } },
       { headers: { 'x-umami-cache': token } },
     );
 
     expect(fetchWebsiteMock).not.toHaveBeenCalled();
     expect(createSessionMock).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toMatchObject({ visitId: 'cached-visit' });
+  });
+
+  test('a valid cache token creates the computed session before event writes when the cached session differs', async () => {
+    const token = makeCacheToken({ sessionId: 'cached-session' });
+
+    const response = await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    const createdSession = createSessionMock.mock.calls[0][0] as Record<string, any>;
+    const savedEvent = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    const body = (await response.json()) as Record<string, any>;
+
+    expect(createdSession.id).not.toBe('cached-session');
+    expect(savedEvent.sessionId).toBe(createdSession.id);
+    expect(savedEvent.visitId).not.toBe('cached-visit');
+    expect(body.sessionId).toBe(createdSession.id);
+    expect(body.visitId).toBe(savedEvent.visitId);
+  });
+
+  test('a valid cache token creates the computed session before identify writes when the cached session differs', async () => {
+    const token = makeCacheToken({ sessionId: 'cached-session' });
+
+    const response = await callPOST(
+      { type: 'identify', payload: { website: WEBSITE_ID, id: 'user-42', data: { plan: 'pro' } } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    const createdSession = createSessionMock.mock.calls[0][0] as Record<string, any>;
+    const savedLink = saveSessionLinkMock.mock.calls[0][0] as Record<string, any>;
+    const updatedSession = updateSessionMock.mock.calls[0][0] as Record<string, any>;
+    const savedSessionData = saveSessionDataMock.mock.calls[0][0] as Record<string, any>;
+    const body = (await response.json()) as Record<string, any>;
+
+    expect(createdSession.id).not.toBe('cached-session');
+    expect(savedLink.sessionId).toBe(createdSession.id);
+    expect(updatedSession.sessionId).toBe(createdSession.id);
+    expect(savedSessionData.sessionId).toBe(createdSession.id);
+    expect(body.sessionId).toBe(createdSession.id);
+    expect(body.visitId).not.toBe('cached-visit');
+  });
+
+  test('a drifted cache token resets the visit in clickhouse mode without creating a session row', async () => {
+    (clickhouse as any).enabled = true;
+    const token = makeCacheToken({ sessionId: 'cached-session' });
+
+    const response = await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    const savedEvent = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    const body = (await response.json()) as Record<string, any>;
+
+    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(savedEvent.sessionId).toBe(body.sessionId);
+    expect(savedEvent.visitId).not.toBe('cached-visit');
+    expect(body.visitId).toBe(savedEvent.visitId);
   });
 
   test('an invalid cache token falls back to website lookup', async () => {
@@ -611,7 +690,7 @@ describe('30-minute visit expiry', () => {
       {
         type: CACHE_TOKEN_TYPE,
         websiteId: WEBSITE_ID,
-        sessionId: 'cached-session',
+        sessionId: makeComputedSessionId(WEBSITE_ID),
         visitId: 'cached-visit',
         iat: recentIat,
       },
@@ -628,11 +707,12 @@ describe('30-minute visit expiry', () => {
 
   test('does not expire the visit when an explicit timestamp is supplied', async () => {
     const oldIat = Math.floor(Date.now() / 1000) - 5000;
+    const timestamp = 1000000000;
     const token = createToken(
       {
         type: CACHE_TOKEN_TYPE,
         websiteId: WEBSITE_ID,
-        sessionId: 'cached-session',
+        sessionId: makeComputedSessionId(WEBSITE_ID, timestamp),
         visitId: 'cached-visit',
         iat: oldIat,
       },
@@ -642,7 +722,7 @@ describe('30-minute visit expiry', () => {
     const response = await callPOST(
       {
         type: 'event',
-        payload: { website: WEBSITE_ID, url: '/', timestamp: 1000000000 },
+        payload: { website: WEBSITE_ID, url: '/', timestamp },
       },
       { headers: { 'x-umami-cache': token } },
     );
@@ -652,6 +732,49 @@ describe('30-minute visit expiry', () => {
 });
 
 describe('identify collection', () => {
+  test('uses distinct IDs to separate sessions with the same client fingerprint', async () => {
+    const first = await callPOST({
+      type: 'identify',
+      payload: { website: WEBSITE_ID, id: 'user-1' },
+    });
+    const second = await callPOST({
+      type: 'identify',
+      payload: { website: WEBSITE_ID, id: 'user-2' },
+    });
+
+    const firstBody = (await first.json()) as Record<string, any>;
+    const secondBody = (await second.json()) as Record<string, any>;
+
+    expect(firstBody.sessionId).not.toBe(secondBody.sessionId);
+    expect(createSessionMock.mock.calls[0][0]).toMatchObject({
+      id: firstBody.sessionId,
+      distinctId: 'user-1',
+    });
+    expect(createSessionMock.mock.calls[1][0]).toMatchObject({
+      id: secondBody.sessionId,
+      distinctId: 'user-2',
+    });
+  });
+
+  test('normalizes distinct IDs before calculating the session ID', async () => {
+    const prefix = 'a'.repeat(50);
+    const first = await callPOST({
+      type: 'identify',
+      payload: { website: WEBSITE_ID, id: `${prefix}-first` },
+    });
+    const second = await callPOST({
+      type: 'identify',
+      payload: { website: WEBSITE_ID, id: `${prefix}-second` },
+    });
+
+    const firstBody = (await first.json()) as Record<string, any>;
+    const secondBody = (await second.json()) as Record<string, any>;
+
+    expect(firstBody.sessionId).toBe(secondBody.sessionId);
+    expect(createSessionMock.mock.calls[0][0]).toMatchObject({ distinctId: prefix });
+    expect(createSessionMock.mock.calls[1][0]).toMatchObject({ distinctId: prefix });
+  });
+
   test('saves a session link and updates the session for a new distinctId', async () => {
     await callPOST({
       type: 'identify',
