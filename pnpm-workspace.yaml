@@ -28,12 +28,34 @@ packages:
 # times a day, "just re-resolve" keeps landing on another too-fresh release.
 # Pinned to versions already months old so the build stops racing the policy;
 # bump these independently whenever, they carry no security fix themselves.
+#
+# The block after electron-to-chromium clears the Wiz Vulnerability PR check on
+# pnpm-lock.yaml (1 critical, 41 high). Each is held on the major line already
+# installed. All are build/test tooling except d3-color: react-simple-maps
+# (the world map) reaches it through d3-zoom/d3-interpolate 2, which accept
+# '1 - 2'. 3.x is the only fixed line; its API is unchanged, it is ESM-only.
 overrides:
   deepmerge-ts: '^8.0.2'
   mysql2: '^3.23.1'
   sharp: '^0.35.5'
   caniuse-lite: '1.0.30001806'
   electron-to-chromium: '1.5.397'
+  brace-expansion@1: '>=1.1.20 <2'
+  brace-expansion@2: '>=2.1.6 <3'
+  browserslist: '>=4.28.7 <5'
+  d3-color@2: '3.1.0'
+  fast-uri: '>=3.1.7 <4'
+  js-yaml: '>=4.3.2 <5'
+  minimatch@3: '>=3.1.4 <4'
+  minimatch@5: '>=5.1.8 <6'
+  minimatch@9: '>=9.0.7 <10'
+  nanoid@3: '>=3.3.18 <4'
+  picomatch@4: '>=4.0.4 <5'
+  shell-quote: '>=1.9.0 <2'
+  source-map-js: '>=1.2.2 <2'
+  svgo@3: '>=3.3.5 <4'
+  undici@8: '>=8.10.2 <9'
+  vite: '~8.0.16'
 allowBuilds:
   '@parcel/watcher': false
   '@prisma/engines': true
