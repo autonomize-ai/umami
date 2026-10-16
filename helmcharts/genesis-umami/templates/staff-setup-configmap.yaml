@@ -105,26 +105,50 @@ data:
     if [ -n "${USER_PRESENT}" ]; then
       # Reconcile the role rather than assuming it: an account left at any
       # other role (created by an older chart, or edited by hand) is put back
-      # to admin. Role AND password are reconciled on every run,
-      # unconditionally.
+      # to admin.
       #
-      # The password matters more than it looks. It lives in the platform
-      # secret, and the bridge authenticates to Umami with it. Rotating that
-      # secret without also updating the Umami account would leave the bridge
-      # holding a password the account no longer has -- so the dashboard breaks
-      # on the next login, with nothing in the logs pointing at a vault edit as
-      # the cause. Sending it every time makes rotation a single vault change.
+      # The password is reconciled too, but ONLY when it no longer works. It
+      # lives in the platform secret, and the bridge authenticates to Umami
+      # with it. Rotating that secret without also updating the Umami account
+      # would leave the bridge holding a password the account no longer has --
+      # so the dashboard breaks on the next login, with nothing in the logs
+      # pointing at a vault edit as the cause.
       #
-      # Umami ignores a password field that already matches, so re-sending the
-      # same value on every deploy is free.
+      # Re-sending an UNCHANGED password is not free. Umami re-hashes whatever
+      # it is given (bcrypt, fresh salt), and every token carries a fingerprint
+      # of the hash it was issued under (src/lib/auth.ts) -- so each re-send
+      # signs out every staff browser and the bridge's own service token. This
+      # job is a PostSync hook and dev syncs every few minutes, so staff were
+      # dropped onto Umami's login page every few minutes. Hence: try the
+      # password first, and only write it when the login is refused.
       CURRENT_ROLE=$(curl -s "${UMAMI_URL}/api/users/${STAFF_ID}" -H "${AUTH}" | jsonpath role)
-      [ "${CURRENT_ROLE}" = "${STAFF_ROLE}" ] \
-        && echo "Account exists with role ${STAFF_ROLE}; reconciling password." \
-        || echo "Account exists with role ${CURRENT_ROLE:-unknown}; updating to ${STAFF_ROLE}."
-      curl -sf -X POST "${UMAMI_URL}/api/users/${STAFF_ID}" \
-        -H "${AUTH}" -H "Content-Type: application/json" \
-        -d "{\"username\":\"${STAFF_USER}\",\"role\":\"${STAFF_ROLE}\",\"password\":\"${STAFF_PASSWORD}\"}" \
-        > /dev/null && echo "Account reconciled." || echo "WARNING: account update failed."
+      if [ "${CURRENT_ROLE}" = "${STAFF_ROLE}" ]; then
+        echo "Account exists with role ${STAFF_ROLE}."
+      else
+        echo "Account exists with role ${CURRENT_ROLE:-unknown}; updating to ${STAFF_ROLE}."
+        curl -sf -X POST "${UMAMI_URL}/api/users/${STAFF_ID}" \
+          -H "${AUTH}" -H "Content-Type: application/json" \
+          -d "{\"role\":\"${STAFF_ROLE}\"}" \
+          > /dev/null && echo "Role updated." || echo "WARNING: role update failed."
+      fi
+
+      STAFF_LOGIN=$(curl -sf -X POST "${UMAMI_URL}/api/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"${STAFF_USER}\",\"password\":\"${STAFF_PASSWORD}\"}") || STAFF_LOGIN=""
+      STAFF_TOKEN=$(echo "${STAFF_LOGIN}" | sed -n 's/.*"token"[ ]*:[ ]*"\([^"]*\)".*/\1/p')
+      if [ -n "${STAFF_TOKEN}" ]; then
+        # /api/auth/login sessions never expire, so drop the one this check
+        # just created rather than leave one behind on every sync.
+        curl -s -X POST "${UMAMI_URL}/api/auth/logout" \
+          -H "Authorization: Bearer ${STAFF_TOKEN}" > /dev/null || true
+        echo "Password already current; left unchanged."
+      else
+        echo "Password refused (rotated in the secret?); updating it."
+        curl -sf -X POST "${UMAMI_URL}/api/users/${STAFF_ID}" \
+          -H "${AUTH}" -H "Content-Type: application/json" \
+          -d "{\"password\":\"${STAFF_PASSWORD}\"}" \
+          > /dev/null && echo "Password updated." || echo "WARNING: password update failed."
+      fi
     else
       echo "Creating staff account (role: ${STAFF_ROLE})..."
       # Role comes from values. Default is `admin`, so a platform admin signing
@@ -137,6 +161,10 @@ data:
         -d "{\"id\":\"${STAFF_ID}\",\"username\":\"${STAFF_USER}\",\"password\":\"${STAFF_PASSWORD}\",\"role\":\"${STAFF_ROLE}\"}" \
         > /dev/null && echo "Created." || echo "WARNING: create failed."
     fi
+
+    # The admin login above is a non-expiring session too; drop it so a job
+    # that runs on every sync does not accumulate them.
+    curl -s -X POST "${UMAMI_URL}/api/auth/logout" -H "${AUTH}" > /dev/null || true
 
     echo "=== Umami staff access setup complete ==="
     exit 0
