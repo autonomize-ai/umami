@@ -855,7 +855,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].image
-          value: sprintregistry.azurecr.io/chainguard/curl:cve-3.12.2
+          value: sprintregistry.azurecr.io/cgr/curl:8.23.0-r1-dev
 
   - it: pulls the fallback curl image from global.imageRegistry
     set:
@@ -869,7 +869,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].image
-          value: customer-acr.azurecr.io/chainguard/curl:cve-3.12.2
+          value: customer-acr.azurecr.io/cgr/curl:8.23.0-r1-dev
 
   - it: honours global.initImage when it actually carries a value
     set:
