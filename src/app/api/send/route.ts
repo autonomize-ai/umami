@@ -2,16 +2,23 @@ import { startOfHour } from 'date-fns';
 import { isbot } from 'isbot';
 import { z } from 'zod';
 import clickhouse from '@/lib/clickhouse';
-import { CACHE_TOKEN_TYPE, COLLECTION_TYPE, EVENT_TYPE } from '@/lib/constants';
+import { CACHE_TOKEN_TYPE, COLLECTION_TYPE, EVENT_TYPE, FIELD_LENGTH } from '@/lib/constants';
 import { getSalt, hash, secret, uuid } from '@/lib/crypto';
 import { getClientInfo, hasBlockedIp } from '@/lib/detect';
+import { truncateString } from '@/lib/format';
 import { createToken, parseToken } from '@/lib/jwt';
 import { fetchWebsite } from '@/lib/load';
 import { parseRequest } from '@/lib/request';
 import { badRequest, forbidden, json, serverError } from '@/lib/response';
 import { anyObjectParam, urlOrPathParam } from '@/lib/schema';
 import { safeDecodeURI, safeDecodeURIComponent } from '@/lib/url';
-import { createSession, saveEvent, saveSessionData, saveSessionLink, updateSession } from '@/queries/sql';
+import {
+  createSession,
+  saveEvent,
+  saveSessionData,
+  saveSessionLink,
+  updateSession,
+} from '@/queries/sql';
 
 interface Cache {
   websiteId: string;
@@ -150,15 +157,20 @@ export async function POST(request: Request) {
 
     const createdAt = timestamp ? new Date(timestamp * 1000) : new Date();
     const now = Math.floor(Date.now() / 1000);
+    const distinctId = truncateString(id, FIELD_LENGTH.distinctId);
 
     const saltRotation = process.env.SALT_ROTATION || 'month';
     const sessionSalt = getSalt(saltRotation, createdAt);
     const visitSalt = hash(startOfHour(createdAt).toUTCString());
 
-    const sessionId = uuid(sourceId, ip, userAgent, sessionSalt);
+    // Identified users need a separate deterministic session from anonymous users
+    // who happen to share the same IP address and user agent.
+    const sessionId = uuid(sourceId, ip, userAgent, sessionSalt, distinctId ?? '');
+    const sessionDrift = !!websiteId && !!cache?.sessionId && cache.sessionId !== sessionId;
+    const shouldEnsureSession = !clickhouse.enabled && sessionDrift;
 
     // Create a session if not found
-    if (!clickhouse.enabled && !cache?.sessionId) {
+    if ((!clickhouse.enabled && !cache?.sessionId) || shouldEnsureSession) {
       await createSession({
         id: sessionId,
         websiteId: sourceId,
@@ -170,7 +182,7 @@ export async function POST(request: Request) {
         country,
         region,
         city,
-        distinctId: id,
+        distinctId,
         createdAt,
       });
     }
@@ -178,6 +190,12 @@ export async function POST(request: Request) {
     // Visit info
     let visitId = cache?.visitId || uuid(sessionId, visitSalt);
     let iat = cache?.iat || now;
+
+    // A drifted cache session should start a fresh visit on the recomputed session.
+    if (sessionDrift) {
+      visitId = uuid(sessionId, visitSalt);
+      iat = now;
+    }
 
     // Expire visit after 30 minutes
     if (!timestamp && now - iat > 1800) {
@@ -266,7 +284,7 @@ export async function POST(request: Request) {
         referrerDomain,
 
         // Session
-        distinctId: id,
+        distinctId,
         browser,
         os,
         device,
@@ -297,8 +315,8 @@ export async function POST(request: Request) {
         twclid,
       });
     } else if (type === COLLECTION_TYPE.identify) {
-      if (websiteId && id) {
-        const newLinkId = hash(sessionId, id);
+      if (websiteId && distinctId) {
+        const newLinkId = hash(sessionId, distinctId);
 
         if (sessionLinkId !== newLinkId) {
           // Best-effort: identity link failures must not block the session data write below.
@@ -307,13 +325,13 @@ export async function POST(request: Request) {
               saveSessionLink({
                 websiteId,
                 sessionId,
-                distinctId: id,
+                distinctId,
                 createdAt,
               }),
               updateSession({
                 websiteId,
                 sessionId,
-                distinctId: id,
+                distinctId,
               }),
             ]);
             sessionLinkId = newLinkId;
@@ -329,7 +347,7 @@ export async function POST(request: Request) {
           websiteId,
           sessionId,
           sessionData: data,
-          distinctId: id,
+          distinctId,
           createdAt,
         });
       }
