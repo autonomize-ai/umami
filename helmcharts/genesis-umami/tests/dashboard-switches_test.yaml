@@ -6,7 +6,13 @@ suite: dashboard-following switches follow global.umamiDashboard.enabled unless 
 # and staff account also serve tracker provisioning, and tenant sign-in is an
 # authorization choice that must stay in step with the route's requiredRoles.
 # The fail-closed guards here only apply to a switch that is FOLLOWING the
-# flag, so an overlay that sets its switches keeps today's behaviour exactly.
+# flag, so an overlay that sets its switches keeps today's behaviour exactly --
+# with one exception: an explicit redis.enabled: false with the flag on refuses
+# unless app.extraEnv supplies REDIS_URL, because the bridge mints every
+# dashboard session through Umami's /api/auth/sso, which fails without Redis.
+# Explicit keycloak.setup.enabled / bridge.reconcile.enabled: false stay valid
+# opt-outs (the client persists in the realm or is managed elsewhere; tenant
+# teams are created on sign-in and /provision needs only the host and app list).
 release:
   name: genesis
   namespace: genesis
@@ -80,13 +86,16 @@ tests:
         contains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
 
   # ── explicit values win over the flag, each way ──────────────────────────
-  - it: keeps Redis off when redis.enabled is explicitly false with the flag on
+  - it: keeps the chart's Redis off when redis.enabled is explicitly false and app.extraEnv supplies REDIS_URL
     set:
       <<: *flagOn
       redis.enabled: false
+      app.extraEnv: [{name: REDIS_URL, value: "redis://external-redis:6379"}]
     asserts:
       - template: templates/deployment.yaml
-        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_PASSWORD}, any: true}
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL, value: "redis://external-redis:6379"}, count: 1}
       - template: templates/deployment.yaml
         notExists: {path: spec.template.spec.volumes}
       - template: templates/keycloak-setup-configmap.yaml
@@ -138,10 +147,11 @@ tests:
       <<: *flagOn
       global.umamiDashboard.enabled: "true"
       redis.enabled: false
+      app.extraEnv: [{name: REDIS_URL, value: "redis://external-redis:6379"}]
       bridge.reconcile.enabled: "false"
     asserts:
       - template: templates/deployment.yaml
-        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_PASSWORD}, any: true}
       - template: templates/deployment.yaml
         notContains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_RECONCILE_ENABLED}, any: true}
 
@@ -207,3 +217,63 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: 'bridge\.reconcile\.enabled but bridge\.reconcile\.platformApps is empty'
+
+  # ── an explicit Redis opt-out cannot leave an enabled dashboard unable to mint ──
+  - it: refuses an explicit redis.enabled false with the flag on and no REDIS_URL
+    template: templates/deployment.yaml
+    set:
+      <<: *flagOn
+      redis.enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: 'global\.umamiDashboard\.enabled is true but redis\.enabled is false and app\.extraEnv supplies no REDIS_URL'
+
+  - it: refuses the string "false" the same way
+    template: templates/deployment.yaml
+    set:
+      <<: *flagOn
+      redis.enabled: "false"
+      app.extraEnv: [{name: OTHER, value: "x"}]
+    asserts:
+      - failedTemplate:
+          errorPattern: 'redis\.enabled is false and app\.extraEnv supplies no REDIS_URL'
+
+  - it: refuses all three switches explicitly false with the flag on, on the Redis check
+    template: templates/deployment.yaml
+    set:
+      <<: *flagOn
+      redis.enabled: false
+      keycloak.setup.enabled: false
+      bridge.reconcile.enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: 'redis\.enabled is false and app\.extraEnv supplies no REDIS_URL'
+
+  - it: renders all three explicitly false with the flag on once REDIS_URL is supplied
+    set:
+      <<: *flagOn
+      redis.enabled: false
+      keycloak.setup.enabled: false
+      bridge.reconcile.enabled: false
+      app.extraEnv: [{name: REDIS_URL, value: "redis://external-redis:6379"}]
+    asserts:
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_PASSWORD}, any: true}
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_RECONCILE_ENABLED}, any: true}
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_PLATFORM_APPS}, any: true}
+      - template: templates/keycloak-setup-configmap.yaml
+        hasDocuments: {count: 0}
+      - template: templates/staff-setup-job.yaml
+        notExists: {path: spec.template.spec.initContainers}
+
+  - it: leaves an explicit redis.enabled false alone when the flag is off (today's overlays)
+    template: templates/deployment.yaml
+    set:
+      global.umamiDashboard.enabled: false
+      bridge.enabled: true
+      redis.enabled: false
+    asserts:
+      - hasDocuments: {count: 1}
+      - notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
