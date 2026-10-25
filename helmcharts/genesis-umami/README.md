@@ -157,6 +157,9 @@ generated — under managed identity none exists at all.
 | `image.digest` | `""` | Optional digest pin; wins over `tag` when set. |
 | `imagePullSecrets` | `[]` | Usually unnecessary — the inherited platform ServiceAccount already carries them. Falls back to `global.serviceAccount.imagePullSecrets.{enabled,secretNames}`, the platform's own shape. |
 | `database.bundled` | `true` | In-chart Postgres vs. external. |
+| `redis.enabled` | `""` | Tri-state. `true`/`false` win; `""` follows `global.umamiDashboard.enabled` (the umbrella's staff-dashboard flag, off when absent). Followed Redis over TLS needs `redis.caCert.secretName`. |
+| `keycloak.setup.enabled` | `""` | Tri-state, same rule. Followed setup needs `keycloak.setup.redirectUri` and `webOrigin`. |
+| `bridge.reconcile.enabled` | `""` | Tri-state, same rule. `bridge.enabled`, `staffSetup.enabled` and `bridge.tenantSignIn.enabled` are never derived: the bridge and staff account also serve tracker provisioning, and tenant sign-in must stay in step with the route's `requiredRoles`. With the flag on and the bridge off, the render refuses. |
 | `database.authMethod` | `""` | `password` or `managed-identity`. Empty inherits `global.database.authMethod`. |
 | `database.external.host` / `.user` / `.port` / `.sslMode` | `""` / `""` / `0` / `""` | Each falls back to the matching `global.database.*`. Read **only** under managed identity — password auth uses `external.url` or `existingSecret` and ignores these. |
 | `database.external.name` | `umami` | Database to connect to. |

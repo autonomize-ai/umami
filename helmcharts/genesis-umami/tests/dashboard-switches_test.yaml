@@ -1,0 +1,209 @@
+suite: dashboard-following switches follow global.umamiDashboard.enabled unless set
+# keycloak.setup.enabled, redis.enabled and bridge.reconcile.enabled ship as ""
+# (unset). An explicit true or false wins; unset follows the umbrella's
+# global.umamiDashboard.enabled, which is off when absent. bridge.enabled,
+# staffSetup.enabled and bridge.tenantSignIn.enabled are NOT derived: the bridge
+# and staff account also serve tracker provisioning, and tenant sign-in is an
+# authorization choice that must stay in step with the route's requiredRoles.
+# The fail-closed guards here only apply to a switch that is FOLLOWING the
+# flag, so an overlay that sets its switches keeps today's behaviour exactly.
+release:
+  name: genesis
+  namespace: genesis
+set:
+  enabled: true
+  database.external.url: "postgresql://u:p@h:5432/d"
+tests:
+  # ── flag absent: the shipped behaviour is unchanged ──────────────────────
+  - it: keeps everything off when the flag is absent and the switches are unset
+    asserts:
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+      - template: templates/deployment.yaml
+        lengthEqual: {path: spec.template.spec.containers, count: 1}
+      - template: templates/keycloak-setup-configmap.yaml
+        hasDocuments: {count: 0}
+      - template: templates/staff-setup-job.yaml
+        hasDocuments: {count: 0}
+
+  - it: keeps everything off when the flag is explicitly false
+    set:
+      global.umamiDashboard.enabled: false
+      bridge.enabled: true
+      staffSetup.enabled: true
+      bridge.reconcile.platformApps: [{chart: genesis-fe, name: AI Studio}]
+    asserts:
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_RECONCILE_ENABLED}, any: true}
+      - template: templates/keycloak-setup-configmap.yaml
+        hasDocuments: {count: 0}
+      - template: templates/staff-setup-job.yaml
+        notExists: {path: spec.template.spec.initContainers}
+
+  # ── flag on: the three unset switches follow it ──────────────────────────
+  - it: turns Redis, the Keycloak client and the reconciler on with the flag when they are unset
+    set: &flagOn
+      global.umamiDashboard.enabled: true
+      bridge.enabled: true
+      staffSetup.enabled: true
+      keycloak.setup.redirectUri: "https://platform.example/umami/callback"
+      keycloak.setup.webOrigin: "https://platform.example"
+      redis.caCert.secretName: "redis-ca"
+      bridge.reconcile.platformApps: [{chart: genesis-fe, name: AI Studio}]
+    asserts:
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL, value: "rediss://:$(REDIS_PASSWORD)@genesis-redis:6379"}, count: 1}
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[0].env', content: {name: NODE_EXTRA_CA_CERTS, value: /etc/redis-ca/ca.crt}, count: 1}
+      - template: templates/deployment.yaml
+        contains: {path: spec.template.spec.volumes, content: {name: redis-ca, secret: {secretName: redis-ca, items: [{key: ca.crt, path: ca.crt}]}}, count: 1}
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_RECONCILE_ENABLED, value: "true"}, count: 1}
+      - template: templates/keycloak-setup-configmap.yaml
+        hasDocuments: {count: 1}
+      - template: templates/staff-setup-job.yaml
+        equal: {path: 'spec.template.spec.initContainers[0].name', value: keycloak-client-setup}
+      - template: templates/staff-setup-job.yaml
+        contains: {path: 'spec.template.spec.initContainers[0].env', content: {name: REDIRECT_URI, value: "https://platform.example/umami/callback"}}
+      # Not derived: tenant sign-in stays off until an overlay says so.
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_TENANT_SIGNIN_ENABLED}, any: true}
+
+  - it: accepts the flag as a string, the way an umbrella --set delivers it
+    set:
+      <<: *flagOn
+      global.umamiDashboard.enabled: "true"
+    asserts:
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+
+  # ── explicit values win over the flag, each way ──────────────────────────
+  - it: keeps Redis off when redis.enabled is explicitly false with the flag on
+    set:
+      <<: *flagOn
+      redis.enabled: false
+    asserts:
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+      - template: templates/deployment.yaml
+        notExists: {path: spec.template.spec.volumes}
+      - template: templates/keycloak-setup-configmap.yaml
+        hasDocuments: {count: 1}
+
+  - it: keeps the Keycloak client off when keycloak.setup.enabled is explicitly false with the flag on
+    set:
+      <<: *flagOn
+      keycloak.setup.enabled: false
+    asserts:
+      - template: templates/keycloak-setup-configmap.yaml
+        hasDocuments: {count: 0}
+      - template: templates/staff-setup-job.yaml
+        notExists: {path: spec.template.spec.initContainers}
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+
+  - it: keeps the reconciler off when bridge.reconcile.enabled is explicitly false with the flag on
+    set:
+      <<: *flagOn
+      bridge.reconcile.enabled: false
+    asserts:
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_RECONCILE_ENABLED}, any: true}
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_PLATFORM_APPS}, any: true}
+
+  - it: turns each switch on explicitly with the flag off or absent (today's overlays)
+    set:
+      bridge.enabled: true
+      staffSetup.enabled: true
+      redis.enabled: true
+      redis.caCert.secretName: "redis-ca"
+      keycloak.setup.enabled: true
+      keycloak.setup.redirectUri: "https://platform.example/umami/callback"
+      keycloak.setup.webOrigin: "https://platform.example"
+      bridge.reconcile.enabled: true
+      bridge.reconcile.platformApps: [{chart: genesis-fe, name: AI Studio}]
+    asserts:
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+      - template: templates/deployment.yaml
+        contains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_RECONCILE_ENABLED, value: "true"}, count: 1}
+      - template: templates/keycloak-setup-configmap.yaml
+        hasDocuments: {count: 1}
+
+  - it: honours an explicit false even when the flag is a string "true"
+    set:
+      <<: *flagOn
+      global.umamiDashboard.enabled: "true"
+      redis.enabled: false
+      bridge.reconcile.enabled: "false"
+    asserts:
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+      - template: templates/deployment.yaml
+        notContains: {path: 'spec.template.spec.containers[1].env', content: {name: BRIDGE_RECONCILE_ENABLED}, any: true}
+
+  # ── invalid and unsafe configurations refuse the render ──────────────────
+  - it: refuses a switch value that is neither a bool, "true", "false" nor unset
+    template: templates/deployment.yaml
+    set:
+      redis.enabled: "yes"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'redis\.enabled must be true, false or "" \(follow global\.umamiDashboard\.enabled\); got "yes"'
+
+  - it: refuses the flag with the bridge off, which the dashboard route targets
+    template: templates/deployment.yaml
+    set:
+      global.umamiDashboard.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: 'global\.umamiDashboard\.enabled is true but bridge\.enabled is false'
+
+  - it: refuses a followed Keycloak client without its redirect URI and web origin
+    template: templates/deployment.yaml
+    set:
+      global.umamiDashboard.enabled: true
+      bridge.enabled: true
+      redis.caCert.secretName: "redis-ca"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'keycloak\.setup follows global\.umamiDashboard\.enabled but keycloak\.setup\.redirectUri / webOrigin are empty'
+
+  - it: refuses followed Redis over TLS without a CA Secret
+    template: templates/deployment.yaml
+    set:
+      global.umamiDashboard.enabled: true
+      bridge.enabled: true
+      keycloak.setup.redirectUri: "https://platform.example/umami/callback"
+      keycloak.setup.webOrigin: "https://platform.example"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'redis follows global\.umamiDashboard\.enabled with tls on but redis\.caCert\.secretName is empty'
+
+  - it: does not apply the followed-switch guards to an explicit switch (today's overlays keep rendering)
+    template: templates/deployment.yaml
+    set:
+      global.umamiDashboard.enabled: true
+      bridge.enabled: true
+      redis.enabled: true
+      keycloak.setup.enabled: true
+      bridge.reconcile.enabled: false
+    asserts:
+      - hasDocuments: {count: 1}
+      - contains: {path: 'spec.template.spec.containers[0].env', content: {name: REDIS_URL}, any: true}
+      - notContains: {path: 'spec.template.spec.containers[0].env', content: {name: NODE_EXTRA_CA_CERTS}, any: true}
+
+  - it: still refuses a followed reconciler whose inputs are missing (the chart's own checks apply either way)
+    template: templates/deployment.yaml
+    set:
+      global.umamiDashboard.enabled: true
+      bridge.enabled: true
+      keycloak.setup.redirectUri: "https://platform.example/umami/callback"
+      keycloak.setup.webOrigin: "https://platform.example"
+      redis.caCert.secretName: "redis-ca"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'bridge\.reconcile\.enabled but bridge\.reconcile\.platformApps is empty'
