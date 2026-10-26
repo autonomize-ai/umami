@@ -50,7 +50,7 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if .Values.keycloak.setup.enabled }}
+      {{- if eq (include "umami.keycloakSetupEnabled" .) "true" }}
       initContainers:
         # Provisions the Keycloak client the GATEWAY uses for this dashboard's
         # route. Runs here rather than as its own Job because it shares this
@@ -165,7 +165,7 @@ spec:
           configMap:
             name: {{ include "umami.fullname" . }}-staff-setup
             defaultMode: 0555
-        {{- if .Values.keycloak.setup.enabled }}
+        {{- if eq (include "umami.keycloakSetupEnabled" .) "true" }}
         - name: keycloak-setup-script
           configMap:
             name: {{ include "umami.fullname" . }}-keycloak-setup

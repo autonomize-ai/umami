@@ -383,6 +383,80 @@ Override staffSetup.userId to pin an exact value.
 {{- end -}}
 
 {{/*
+  umami.dashboardSwitch — resolve one of the switches that follow the staff
+  dashboard (keycloak.setup.enabled, redis.enabled, bridge.reconcile.enabled).
+  An explicit true or false (a bool, or the strings "true"/"false") wins. Unset
+  -- the shipped "" or an absent key -- follows global.umamiDashboard.enabled,
+  which is off when the umbrella does not set it. Any other value refuses the
+  render, so a typo cannot read as "off". Renders "true" or "false".
+  Call with (dict "ctx" . "key" "<values path>" "value" <the value>).
+*/}}
+{{- define "umami.dashboardSwitch" -}}
+{{- $v := .value -}}
+{{- if or (kindIs "bool" $v) (and (kindIs "string" $v) (or (eq $v "true") (eq $v "false"))) -}}
+{{- toString $v -}}
+{{- else if and (not (kindIs "invalid" $v)) (ne (toString $v) "") -}}
+{{- fail (printf "genesis-umami: %s must be true, false or \"\" (follow global.umamiDashboard.enabled); got %q" .key (toString $v)) -}}
+{{- else -}}
+{{- toString (eq (toString (dig "umamiDashboard" "enabled" false (.ctx.Values.global | default dict))) "true") -}}
+{{- end -}}
+{{- end -}}
+
+{{/* umami.dashboardEnabled — the umbrella's staff-dashboard flag as "true"/"false". */}}
+{{- define "umami.dashboardEnabled" -}}
+{{- toString (eq (toString (dig "umamiDashboard" "enabled" false (.Values.global | default dict))) "true") -}}
+{{- end -}}
+
+{{/* The three resolved switches, each "true" or "false". */}}
+{{- define "umami.redisEnabled" -}}
+{{- include "umami.dashboardSwitch" (dict "ctx" . "key" "redis.enabled" "value" .Values.redis.enabled) -}}
+{{- end -}}
+{{- define "umami.keycloakSetupEnabled" -}}
+{{- include "umami.dashboardSwitch" (dict "ctx" . "key" "keycloak.setup.enabled" "value" .Values.keycloak.setup.enabled) -}}
+{{- end -}}
+{{- define "umami.reconcileEnabled" -}}
+{{- include "umami.dashboardSwitch" (dict "ctx" . "key" "bridge.reconcile.enabled" "value" (dig "reconcile" "enabled" "" .Values.bridge)) -}}
+{{- end -}}
+
+{{/*
+  umami.dashboardGuards — fail-closed checks for a dashboard that would be
+  switched on by the flag but could not work. Only the FOLLOWED (unset) switches
+  are checked here, so an overlay that sets a switch explicitly keeps today's
+  behaviour; the chart's own checks (tenantSignIn role gate, reconciler inputs)
+  still apply to both. Renders nothing.
+*/}}
+{{- define "umami.dashboardGuards" -}}
+{{- if and .Values.enabled (eq (include "umami.dashboardEnabled" .) "true") -}}
+{{- if not .Values.bridge.enabled -}}
+{{- fail "genesis-umami: global.umamiDashboard.enabled is true but bridge.enabled is false -- the gateway's dashboard route targets the login bridge; enable the bridge or switch the dashboard off" -}}
+{{- end -}}
+{{- /* Unlike the other two switches, an explicit redis.enabled: false cannot
+     be a working opt-out while the dashboard is on: the bridge mints every
+     dashboard session (staff and tenant) through Umami's /api/auth/sso, which
+     answers 500 "Redis is disabled" without REDIS_URL. A REDIS_URL supplied
+     through app.extraEnv is the one supported way to run Redis outside this
+     chart's composition, so it satisfies the check. */ -}}
+{{- if ne (include "umami.redisEnabled" .) "true" -}}
+{{- $extRedis := false -}}
+{{- range (.Values.app.extraEnv | default list) -}}
+{{- if eq (toString (dig "name" "" .)) "REDIS_URL" -}}{{- $extRedis = true -}}{{- end -}}
+{{- end -}}
+{{- if not $extRedis -}}
+{{- fail "genesis-umami: global.umamiDashboard.enabled is true but redis.enabled is false and app.extraEnv supplies no REDIS_URL -- the login bridge mints every dashboard session through Umami's /api/auth/sso, which fails without Redis; enable redis, supply REDIS_URL through app.extraEnv, or switch the dashboard off" -}}
+{{- end -}}
+{{- end -}}
+{{- $kcSet := .Values.keycloak.setup.enabled -}}
+{{- if and (not (kindIs "bool" $kcSet)) (eq (toString $kcSet) "") (or (not .Values.keycloak.setup.redirectUri) (not .Values.keycloak.setup.webOrigin)) -}}
+{{- fail "genesis-umami: keycloak.setup follows global.umamiDashboard.enabled but keycloak.setup.redirectUri / webOrigin are empty -- set both (the route's redirect_uri and the platform origin), or set keycloak.setup.enabled explicitly" -}}
+{{- end -}}
+{{- $redisSet := .Values.redis.enabled -}}
+{{- if and (not (kindIs "bool" $redisSet)) (eq (toString $redisSet) "") .Values.redis.tls (not .Values.redis.caCert.secretName) -}}
+{{- fail "genesis-umami: redis follows global.umamiDashboard.enabled with tls on but redis.caCert.secretName is empty -- name the CA Secret for the in-cluster Redis, or set redis.enabled explicitly" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Pod tolerations for every pod this chart renders (umami + bridge Deployment,
 staff-setup Job, bundled PostgreSQL StatefulSet). Same contract as
 genesis-lib.tolerations for a cpu-class chart, without depending on genesis-lib:

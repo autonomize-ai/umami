@@ -234,7 +234,13 @@ basePath: "/umami"
 # exists there for every other Redis client, and a second copy of it embedded in
 # a URL is one more thing to rotate in lockstep.
 redis:
-  enabled: false
+  # Tri-state. true / false are explicit and always win. The shipped "" means
+  # "follow global.umamiDashboard.enabled" (the umbrella's staff-dashboard flag;
+  # off when absent), so an overlay that only switches the dashboard on gets
+  # Redis with it, and an overlay that sets this key keeps exactly what it set.
+  # When it follows the flag, tls without redis.caCert.secretName refuses the
+  # render rather than shipping a sign-in path that fails the TLS handshake.
+  enabled: ""
   host: "genesis-redis"
   port: 6379
   # node-redis takes user:password. Redis AUTH without an ACL user wants the
@@ -323,7 +329,11 @@ staffSetup:
 # event collection, and the dashboard turns on when its values say so.
 keycloak:
   setup:
-    enabled: false
+    # Tri-state, like redis.enabled: true / false win; the shipped "" follows
+    # global.umamiDashboard.enabled (off when absent). When it follows the flag,
+    # redirectUri and webOrigin must be set or the render refuses: a client with
+    # no redirect URI would be provisioned and the route would still 400.
+    enabled: ""
     # In-cluster Keycloak address. The admin API is not published at the edge.
     url: "http://genesis-idp:8080/auth"
     realm: "autonomize"
@@ -386,7 +396,10 @@ bridge:
   # Needs routeRegistration.enabled: it reuses that block's authz URL and
   # internal key (the same key genesis-provisioner sends to this endpoint).
   reconcile:
-    enabled: false
+    # Tri-state, like redis.enabled: true / false win; the shipped "" follows
+    # global.umamiDashboard.enabled (off when absent). The reconciler's own
+    # requirements (routeRegistration, platformApps, timeouts) apply either way.
+    enabled: ""
     # How long authz may hold one org-list call open waiting for a change.
     pollIntervalSeconds: 30
     # MUST be greater than pollIntervalSeconds, or the client gives up the

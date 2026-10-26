@@ -1,4 +1,5 @@
 {{- if .Values.enabled }}
+{{- include "umami.dashboardGuards" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -73,7 +74,7 @@ spec:
             - name: DISABLE_TELEMETRY
               value: "1"
             {{- end }}
-            {{- if .Values.redis.enabled }}
+            {{- if eq (include "umami.redisEnabled" .) "true" }}
             # Redis, composed rather than supplied as a whole URL.
             #
             # The password already exists in the platform secret for every other
@@ -115,7 +116,7 @@ spec:
             {{- with .Values.app.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if and .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName }}
+          {{- if and (eq (include "umami.redisEnabled" .) "true") .Values.redis.tls .Values.redis.caCert.secretName }}
           volumeMounts:
             - name: redis-ca
               mountPath: /etc/redis-ca
@@ -244,7 +245,8 @@ spec:
                    runtime fails the render here instead. */}}
             {{- $reconcile := .Values.bridge.reconcile | default dict }}
             {{- $tenant := .Values.bridge.tenantSignIn | default dict }}
-            {{- if $reconcile.enabled }}
+            {{- $reconcileOn := eq (include "umami.reconcileEnabled" .) "true" }}
+            {{- if $reconcileOn }}
             {{- if not .Values.bridge.routeRegistration.enabled }}
             {{- fail "genesis-umami: bridge.reconcile.enabled needs bridge.routeRegistration.enabled -- the reconciler reads the org list with that block's authz URL and internal key." }}
             {{- end }}
@@ -270,7 +272,7 @@ spec:
                    not only when a half is on: the platform apps call /provision
                    wherever Umami runs, and without these the bridge answers 503
                    and the app renders no tracker at all. */}}
-            {{- if or $reconcile.enabled $tenant.enabled $reconcile.platformApps }}
+            {{- if or $reconcileOn $tenant.enabled $reconcile.platformApps }}
             - name: BRIDGE_PLATFORM_HOST
               value: {{ include "umami.platformHost" . | quote }}
             - name: BRIDGE_PLATFORM_APPS
@@ -315,7 +317,7 @@ spec:
           resources:
             {{- toYaml .Values.bridge.resources | nindent 12 }}
         {{- end }}
-      {{- if and .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName }}
+      {{- if and (eq (include "umami.redisEnabled" .) "true") .Values.redis.tls .Values.redis.caCert.secretName }}
       volumes:
         - name: redis-ca
           secret:

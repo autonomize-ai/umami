@@ -1,4 +1,4 @@
-{{- if and .Values.enabled .Values.keycloak.setup.enabled }}
+{{- if and .Values.enabled (eq (include "umami.keycloakSetupEnabled" .) "true") }}
 {{- $fullname := include "umami.fullname" . -}}
 apiVersion: v1
 kind: ConfigMap
