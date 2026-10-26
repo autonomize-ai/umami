@@ -1,5 +1,8 @@
 ARG NODE_IMAGE_VERSION="22-alpine"
-ARG PNPM_VERSION="11.28.2"
+# 11.28.8 bundles undici 6.29.1 in dist/node_modules; 11.28.2 bundled 6.28.1
+# (CVE-2026-109869 / GHSA-xjj6-f33q-929c, high), which image scanning reports
+# against /usr/local/lib/node_modules/pnpm in the runner stage.
+ARG PNPM_VERSION="11.28.8"
 # Keep in sync with the prisma/@prisma/* versions in package.json
 ARG PRISMA_VERSION="7.9.1"
 # @azure/identity is installed into the runner stage for the startup scripts
@@ -9,6 +12,8 @@ ARG AZURE_IDENTITY_VERSION="4.13.1"
 ARG DEEPMERGE_TS_VERSION="^8.0.2"
 # Keep in sync with the mysql2 override in pnpm-workspace.yaml
 ARG MYSQL2_VERSION="^3.23.1"
+# Keep in sync with the @azure/msal-node override in pnpm-workspace.yaml
+ARG MSAL_NODE_VERSION=">=7.1.0 <8"
 
 # Install dependencies only when needed
 FROM node:${NODE_IMAGE_VERSION} AS deps
@@ -54,6 +59,7 @@ ARG PRISMA_VERSION
 ARG AZURE_IDENTITY_VERSION
 ARG DEEPMERGE_TS_VERSION
 ARG MYSQL2_VERSION
+ARG MSAL_NODE_VERSION
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -71,13 +77,16 @@ RUN adduser --system --uid 1001 nextjs
 # the only stage that needs the upgrade, and it has to precede the curl install
 # so libcurl resolves against the patched libssl3. zlib is upgraded the same
 # way: the base ships 1.3.2-r0 (CVE-2026-85091, HIGH) and v3.24/main has r1.
+# curl carries a floor for the same reason: 8.22.0-r0 has CVE-2026-92392 (HIGH,
+# public exploit) and v3.24/main has 8.23.0-r0. The floor makes the build fail
+# instead of silently shipping the old curl if the mirror lags.
 #
 # Then bootstrap pnpm with the bundled npm and remove npm in the same layer, so
 # the vulnerable packages vendored inside the npm CLI are not shipped in the
 # final image. pnpm is the only package manager needed at build and runtime.
 RUN set -x \
     && apk upgrade --no-cache libssl3 libcrypto3 zlib \
-    && apk add --no-cache curl libc6-compat \
+    && apk add --no-cache 'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' libc6-compat \
     && npm install -g pnpm@${PNPM_VERSION} \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
@@ -85,12 +94,13 @@ RUN echo {} > package.json
 
 # The overrides have to be repeated here. This stage resolves its own dependency
 # tree from scratch, and prisma pulls @prisma/config -> deepmerge-ts 7.1.5 and
-# mysql2 3.15.3; the app lockfile does not constrain it. Without these the
-# runtime install puts the vulnerable copies back into /app/node_modules - and
-# writes them into the /app/pnpm-lock.yaml that `pnpm add` generates - so the
-# image stays flagged even though the app lockfile is clean. Both of those are
-# paths image scanning reports against.
-RUN printf "allowBuilds:\n  '@prisma/engines': true\n  prisma: false\nverifyDepsBeforeRun: false\noverrides:\n  deepmerge-ts: '${DEEPMERGE_TS_VERSION}'\n  mysql2: '${MYSQL2_VERSION}'\n" > pnpm-workspace.yaml
+# mysql2 3.15.3, and @azure/identity pulls @azure/msal-node 5.x; the app
+# lockfile does not constrain it. Without these the runtime install puts the
+# vulnerable copies back into /app/node_modules - and writes them into the
+# /app/pnpm-lock.yaml that `pnpm add` generates - so the image stays flagged
+# even though the app lockfile is clean. Both of those are paths image scanning
+# reports against.
+RUN printf "allowBuilds:\n  '@prisma/engines': true\n  prisma: false\nverifyDepsBeforeRun: false\noverrides:\n  deepmerge-ts: '${DEEPMERGE_TS_VERSION}'\n  mysql2: '${MYSQL2_VERSION}'\n  '@azure/msal-node': '${MSAL_NODE_VERSION}'\n" > pnpm-workspace.yaml
 
 # Script dependencies
 RUN pnpm add npm-run-all dotenv chalk semver \

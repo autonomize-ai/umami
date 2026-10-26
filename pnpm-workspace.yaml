@@ -34,7 +34,17 @@ packages:
 # installed. All are build/test tooling except d3-color: react-simple-maps
 # (the world map) reaches it through d3-zoom/d3-interpolate 2, which accept
 # '1 - 2'. 3.x is the only fixed line; its API is unchanged, it is ESM-only.
+#
+# @azure/msal-node 5.x carries GHSA-xcx6-jx8p-x3h5 / CVE-2026-109461 (high,
+# authorization code flow may disclose parameters), fixed only in 7.1.0 - no 5.x
+# or 6.x backport. @azure/identity reaches it (4.13.x asks for ^5, 4.14.0 for
+# ^6) and no identity release accepts 7.x yet, so an override is the only route.
+# The 6.0 and 7.0 breaking changes are confined to acquireTokenInteractive and
+# its loopback client; umami only calls DefaultAzureCredential().getToken() for
+# the Postgres AAD token (src/lib/azure-db.ts, scripts/azure-db.js), which never
+# takes the interactive path. The Dockerfile runner stage repeats this override.
 overrides:
+  '@azure/msal-node': '>=7.1.0 <8'
   deepmerge-ts: '^8.0.2'
   mysql2: '^3.23.1'
   sharp: '^0.35.5'
