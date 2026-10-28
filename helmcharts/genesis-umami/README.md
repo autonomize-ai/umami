@@ -171,6 +171,10 @@ generated — under managed identity none exists at all.
 | `postgresql.podSecurityContext` | UID/GID `70` | The Chainguard image's `postgres` account. `initdb` hard-fails under any other UID. |
 | `app.appSecret` | `""` | Auto-generated + reused across upgrades; set explicitly for GitOps. |
 | `ingress.enabled` | `false` | Off by default; access via port-forward. |
+| `bridge.query.enabled` | `true` | The app-facing query API (`POST /analytics/query/{siteId}`, `GET /analytics/schema/{siteId}`). Gives the bridge the database URL; reads run in read-only, rolled-back transactions. `false` withholds the URL and the endpoints answer 503. Needs the matching gateway routes. |
+| `bridge.query.statementTimeoutMs` | `30000` | Postgres cancels a longer query and the caller gets a 504. The window a caller asks for is deliberately uncapped; this bounds the cost instead. |
+| `bridge.query.database.existingSecret` / `.existingSecretKey` | `""` / `DATABASE_URL` | Optional URL for a SELECT-only role, so the database enforces read-only too. Empty reuses Umami's own connection. |
+| `bridge.provisionAdoptExisting` | `false` | Keep off. On, `/provision` records the caller as an owner of a site that already exists, which lets any app co-own another app's site. Turn on for one deploy only to migrate sites created before ownership recording. |
 
 ## Tests
 
