@@ -545,28 +545,70 @@ bridge:
   # prefix. Published under `basePath`, the per-site check would silently never
   # run and one app would read another's numbers with a 200.
   #
-  # Must match the gateway route that publishes it (`/analytics/insights/*`).
+  # Must match the gateway routes that publish it (`/analytics/query/*`,
+  # `/analytics/schema/*`).
   apiBasePath: "/analytics"
-  # Must match the gateway route that publishes it.
-  # The site id is a PATH segment: /insights/{siteId}, not ?site=. That is what
-  # lets genesis-authz authorize the call per site -- every URI matcher there
-  # strips the query string before matching, so an id in the query leaves the
-  # authorization rule with no object to check.
-  insightsPath: "/insights"
-  # Guard rails on the query, so no app can make Umami scan all of history.
-  insightsMaxDays: 90
-  insightsDefaultDays: 7
-  # Default rows per section, and the ceiling a caller may raise it to. Bounded
-  # on both ends: an unbounded limit is the query this endpoint exists to
-  # prevent.
-  insightsTopN: 10
-  insightsMaxTopN: 100
+
+  # The query API: POST {apiBasePath}{query.path}/{siteId} returns one site's
+  # events, sessions or grouped counts for a structured JSON request, and
+  # GET {apiBasePath}{query.schemaPath}/{siteId} lists the event names and
+  # property keys it holds.
+  #
+  # Authorized per site. The site id is a PATH segment, not ?site=: every URI
+  # matcher in genesis-authz strips the query string before matching, so an id
+  # in the query would leave the authorization rule with no object to check.
+  #
+  # It returns ROWS (one per event or session) as well as aggregates. Page
+  # titles, query strings, referrer paths, distinct_id and ad click ids are
+  # unreachable through it -- see bridge/query.mjs.
+  #
+  # It reads Postgres directly, read-only: every statement runs inside
+  # `BEGIN READ ONLY` and is rolled back, so it reuses Umami's own connection
+  # and needs no new database role. A deployment that wants the database to
+  # enforce read-only as well points `database.existingSecret` at a Secret
+  # holding a URL for a SELECT-only role; leave it empty to use Umami's.
+  #
+  # Both paths must match the gateway routes that publish them.
+  query:
+    enabled: true
+    path: "/query"
+    schemaPath: "/schema"
+    # Postgres cancels any statement that runs longer, and the caller gets a
+    # 504. There is deliberately no cap on the window a caller asks for; this
+    # is what bounds the cost instead.
+    statementTimeoutMs: 30000
+    maxEventsPage: 1000
+    maxSessionsPage: 200
+    maxAggregateRows: 10000
+    # Matching events nested under each session when include_events is set.
+    nestedEventsMax: 100
+    # Connections the bridge holds open to Postgres for the query API.
+    poolMax: 4
+    database:
+      existingSecret: ""
+      existingSecretKey: "DATABASE_URL"
+
+  # Record the caller as owner when /provision finds the site ALREADY exists.
+  #
+  # Leave false. On, any app with a platform key can make itself a co-owner of
+  # any other app's site (site ids are derived, so guessable) and read it.
+  # Off, only the call that creates a site records its owner.
+  #
+  # Turn on for ONE deploy only when upgrading an environment whose sites
+  # predate ownership recording (bridge releases before 2026-09-10): every app
+  # re-provisions on boot and adopts its site. Then turn it off again.
+  provisionAdoptExisting: false
   resources:
     requests:
       cpu: 10m
       memory: 48Mi
+    # Idle, the bridge sits near 55Mi. The query API reads whole result sets
+    # into memory before answering, and its limits allow large ones (up to
+    # 10,000 aggregate rows, or 200 sessions with 100 events each), so 128Mi
+    # left too little headroom. Only the limit is raised: scheduling uses the
+    # request, which stays at 48Mi.
     limits:
-      memory: 128Mi
+      memory: 256Mi
 
 ingress:
   enabled: false
