@@ -152,6 +152,11 @@ database:
   # Secret needs a namespaced key, e.g. UMAMI_DATABASE_URL, because plain
   # DATABASE_URL in a Secret every pod mounts would collide with the next
   # service that wants one. Mirrors app.existingSecretKey.
+  #
+  # Read only together with existingSecret. When existingSecret is empty the
+  # chart owns the Secret and always writes (and reads) DATABASE_URL, so this
+  # key can be preset platform-wide (for example by the umbrella) without
+  # breaking installs that let the chart own their connection string.
   existingSecretKey: DATABASE_URL
 
 postgresql:
