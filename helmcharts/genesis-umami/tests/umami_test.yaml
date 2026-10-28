@@ -706,7 +706,7 @@ tests:
       - equal:
           path: spec.template.spec.containers[1].resources.limits
           value:
-            cpu: 500m
+            cpu: "1"
             memory: 256Mi
 
   # The pinned counts make a new container fail here until its limits are asserted too.

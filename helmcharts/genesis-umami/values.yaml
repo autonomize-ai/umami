@@ -609,7 +609,7 @@ bridge:
     # left too little headroom. Only the limit is raised: scheduling uses the
     # request, which stays at 48Mi.
     limits:
-      cpu: 500m
+      cpu: "1"
       memory: 256Mi
 
 ingress:
