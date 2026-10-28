@@ -8,6 +8,10 @@ ARG PRISMA_VERSION="7.9.1"
 # @azure/identity is installed into the runner stage for the startup scripts
 # (scripts/azure-db.js), which run outside the Next.js bundle.
 ARG AZURE_IDENTITY_VERSION="4.13.1"
+# pg is installed into the runner stage for the login bridge's query API
+# (bridge/db.mjs), which runs outside the Next.js bundle and so cannot rely on
+# the bundle's traced copy. Keep in sync with "pg" in package.json.
+ARG PG_VERSION="8.23.0"
 # Keep in sync with the deepmerge-ts override in pnpm-workspace.yaml
 ARG DEEPMERGE_TS_VERSION="^8.0.2"
 # Keep in sync with the mysql2 override in pnpm-workspace.yaml
@@ -57,6 +61,7 @@ ARG NODE_OPTIONS
 ARG PNPM_VERSION
 ARG PRISMA_VERSION
 ARG AZURE_IDENTITY_VERSION
+ARG PG_VERSION
 ARG DEEPMERGE_TS_VERSION
 ARG MYSQL2_VERSION
 ARG MSAL_NODE_VERSION
@@ -105,6 +110,7 @@ RUN printf "allowBuilds:\n  '@prisma/engines': true\n  prisma: false\nverifyDeps
 # Script dependencies
 RUN pnpm add npm-run-all dotenv chalk semver \
     @azure/identity@${AZURE_IDENTITY_VERSION} \
+    pg@${PG_VERSION} \
     prisma@${PRISMA_VERSION} \
     @prisma/client@${PRISMA_VERSION} \
     @prisma/adapter-pg@${PRISMA_VERSION}

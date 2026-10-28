@@ -752,18 +752,13 @@ tests:
           path: data["keycloak-setup.sh"]
           pattern: '"consentRequired": false'
 
-  - it: publishes the insights read path to the bridge, with its guard rails
+  - it: publishes the read API outside the Umami prefix
     set:
       enabled: true
       database.external.url: "postgresql://u:p@h:5432/d"
       bridge.enabled: true
     template: templates/deployment.yaml
     asserts:
-      # Set explicitly rather than left to the bridge's default, because it has
-      # to match the gateway route that publishes it.
-      - equal:
-          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_INSIGHTS_PATH")].value
-          value: "/insights"
       # The read API is published OUTSIDE the Umami prefix on purpose: authz
       # checks bypass rows before per-resource rows, and the bridge bypasses
       # Umami's whole tree, so a per-site rule under /umami never runs. If this
@@ -774,11 +769,104 @@ tests:
       - notEqual:
           path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_API_BASE_PATH")].value
           value: "/umami"
-      # The window cap is what stops an app asking Umami to scan all history.
-      # Asserted so it cannot be dropped silently in a values refactor.
+
+  - it: publishes the query API to the bridge, reading through Umami's own connection
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      # Both paths have to match the gateway routes that publish them.
       - equal:
-          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_INSIGHTS_MAX_DAYS")].value
-          value: "90"
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_QUERY_PATH")].value
+          value: "/query"
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_SCHEMA_PATH")].value
+          value: "/schema"
+      # The statement timeout is what bounds a query's cost, since the window
+      # is deliberately uncapped. Asserted so it cannot be dropped silently.
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_QUERY_STATEMENT_TIMEOUT_MS")].value
+          value: "30000"
+      # No new role or Secret: the bridge reads the URL Umami already uses.
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="DATABASE_URL")].valueFrom.secretKeyRef
+          value:
+            name: genesis-genesis-umami
+            key: DATABASE_URL
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_QUERY_DATABASE_URL")]
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="AZURE_USE_MANAGED_IDENTITY")]
+
+  - it: reads through a dedicated database role when one is supplied
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+      bridge.query.database.existingSecret: umami-readonly-db
+      bridge.query.database.existingSecretKey: READONLY_URL
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_QUERY_DATABASE_URL")].valueFrom.secretKeyRef
+          value:
+            name: umami-readonly-db
+            key: READONLY_URL
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="DATABASE_URL")]
+
+  - it: gives the bridge Entra token auth when the database uses managed identity
+    set:
+      enabled: true
+      bridge.enabled: true
+      database.bundled: false
+      database.authMethod: managed-identity
+      database.external.host: customer-pg.postgres.database.azure.com
+      database.external.user: umami-identity
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="AZURE_USE_MANAGED_IDENTITY")].value
+          value: "true"
+
+  - it: withholds the database from the bridge when the query API is off
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+      bridge.query.enabled: false
+    template: templates/deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="DATABASE_URL")]
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_QUERY_PATH")]
+
+  # Adopting an existing site on provision lets any app co-own any other app's
+  # site, so it is off unless an environment switches it on for a migration.
+  - it: does not adopt existing sites on provision unless asked to
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_PROVISION_ADOPT_EXISTING")]
+
+  - it: adopts existing sites on provision when an environment migrates
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+      bridge.provisionAdoptExisting: true
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].env[?(@.name=="BRIDGE_PROVISION_ADOPT_EXISTING")].value
+          value: "true"
 
   - it: blocks resetting a site, and no longer blocks deleting one
     set:

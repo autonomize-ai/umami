@@ -218,19 +218,54 @@ spec:
                    publishes it. */}}
             - name: BRIDGE_API_BASE_PATH
               value: {{ .Values.bridge.apiBasePath | default "/analytics" | quote }}
-            {{- /* Set explicitly for the same reason as the provisioning path:
-                   it has to match the gateway route that publishes it, and a
-                   silent default makes that pairing easy to break. */}}
-            - name: BRIDGE_INSIGHTS_PATH
-              value: {{ .Values.bridge.insightsPath | default "/insights" | quote }}
-            - name: BRIDGE_INSIGHTS_MAX_DAYS
-              value: {{ .Values.bridge.insightsMaxDays | default 90 | quote }}
-            - name: BRIDGE_INSIGHTS_DEFAULT_DAYS
-              value: {{ .Values.bridge.insightsDefaultDays | default 7 | quote }}
-            - name: BRIDGE_INSIGHTS_TOP_N
-              value: {{ .Values.bridge.insightsTopN | default 10 | quote }}
-            - name: BRIDGE_INSIGHTS_MAX_TOP_N
-              value: {{ .Values.bridge.insightsMaxTopN | default 100 | quote }}
+            {{- /* The query API. Without a database URL the bridge answers 503
+                   on /query and /schema and everything else is unaffected, so
+                   `enabled: false` simply withholds the connection. */}}
+            {{- $query := .Values.bridge.query | default dict }}
+            {{- if $query.enabled }}
+            {{- $queryDb := $query.database | default dict }}
+            - name: BRIDGE_QUERY_PATH
+              value: {{ $query.path | default "/query" | quote }}
+            - name: BRIDGE_SCHEMA_PATH
+              value: {{ $query.schemaPath | default "/schema" | quote }}
+            - name: BRIDGE_QUERY_STATEMENT_TIMEOUT_MS
+              value: {{ $query.statementTimeoutMs | default 30000 | quote }}
+            - name: BRIDGE_QUERY_MAX_EVENTS_PAGE
+              value: {{ $query.maxEventsPage | default 1000 | quote }}
+            - name: BRIDGE_QUERY_MAX_SESSIONS_PAGE
+              value: {{ $query.maxSessionsPage | default 200 | quote }}
+            - name: BRIDGE_QUERY_MAX_AGGREGATE_ROWS
+              value: {{ $query.maxAggregateRows | default 10000 | quote }}
+            - name: BRIDGE_QUERY_NESTED_EVENTS_MAX
+              value: {{ $query.nestedEventsMax | default 100 | quote }}
+            - name: BRIDGE_QUERY_POOL_MAX
+              value: {{ $query.poolMax | default 4 | quote }}
+            {{- if $queryDb.existingSecret }}
+            # A dedicated (e.g. SELECT-only) role for the query API.
+            - name: BRIDGE_QUERY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $queryDb.existingSecret | quote }}
+                  key: {{ $queryDb.existingSecretKey | default "DATABASE_URL" | quote }}
+            {{- else }}
+            # Umami's own connection, read through read-only transactions.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "umami.secretName" . }}
+                  key: {{ .Values.database.existingSecretKey | quote }}
+            {{- end }}
+            {{- if include "umami.usesManagedIdentity" . }}
+            # Same Entra token auth as the umami container: a token per
+            # connection, no password in the URL.
+            - name: AZURE_USE_MANAGED_IDENTITY
+              value: "true"
+            {{- end }}
+            {{- end }}
+            {{- if .Values.bridge.provisionAdoptExisting }}
+            - name: BRIDGE_PROVISION_ADOPT_EXISTING
+              value: "true"
+            {{- end }}
             - name: UMAMI_STAFF_USER
               value: {{ .Values.staffSetup.username | quote }}
             - name: UMAMI_STAFF_PASSWORD
