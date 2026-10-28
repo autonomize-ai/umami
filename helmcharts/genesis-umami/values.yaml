@@ -306,6 +306,7 @@ staffSetup:
       cpu: 10m
       memory: 32Mi
     limits:
+      cpu: 500m
       memory: 64Mi
 
 # ---- Keycloak client --------------------------------------------------------
@@ -566,6 +567,7 @@ bridge:
       cpu: 10m
       memory: 48Mi
     limits:
+      cpu: 500m
       memory: 128Mi
 
 ingress:
