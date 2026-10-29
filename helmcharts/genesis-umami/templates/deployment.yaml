@@ -51,11 +51,21 @@ spec:
             {{- end }}
             # DATABASE_URL comes from the user's existingSecret when set,
             # otherwise from this chart's Secret.
+            {{- /* existingSecretKey names the key inside the user's Secret only:
+                 the chart's own Secret always writes DATABASE_URL
+                 (templates/secret.yaml), so a key override without an
+                 existingSecret must not be applied to it. Same split as
+                 APP_SECRET below. */}}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "umami.secretName" . }}
+                  {{- if .Values.database.existingSecret }}
+                  name: {{ .Values.database.existingSecret }}
                   key: {{ .Values.database.existingSecretKey | quote }}
+                  {{- else }}
+                  name: {{ include "umami.fullname" . }}
+                  key: "DATABASE_URL"
+                  {{- end }}
             # APP_SECRET comes from app.existingSecret when set (the GitOps
             # path), otherwise from this chart's own Secret. It is never read
             # from database.existingSecret, which carries DATABASE_URL only.

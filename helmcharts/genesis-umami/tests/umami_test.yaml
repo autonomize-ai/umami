@@ -302,6 +302,67 @@ tests:
           path: spec.template.spec.containers[0].env[2].valueFrom.secretKeyRef.name
           value: genesis-genesis-umami
 
+  # existingSecretKey names the key inside the USER's Secret only. The chart's
+  # own Secret always writes DATABASE_URL, so a key preset without an
+  # existingSecret (an umbrella default, say) must not be applied to it.
+  - it: reads the default DATABASE_URL key from the existingSecret when no key is set
+    set:
+      enabled: true
+      database.bundled: false
+      database.existingSecret: my-umami-db
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef
+          value: { name: my-umami-db, key: DATABASE_URL }
+
+  - it: reads an explicit existingSecretKey from the existingSecret
+    set:
+      enabled: true
+      database.bundled: false
+      database.existingSecret: ai-studio-secrets
+      database.existingSecretKey: UMAMI_DATABASE_URL
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef
+          value: { name: ai-studio-secrets, key: UMAMI_DATABASE_URL }
+
+  - it: ignores existingSecretKey and reads DATABASE_URL from its own Secret when no existingSecret is set (external URL)
+    set:
+      enabled: true
+      database.bundled: false
+      database.external.url: postgresql://umami:pw@db.example.test:5432/umami
+      database.existingSecretKey: UMAMI_DATABASE_URL
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef
+          value: { name: genesis-genesis-umami, key: DATABASE_URL }
+
+  - it: ignores existingSecretKey and reads DATABASE_URL from its own Secret when no existingSecret is set (bundled)
+    set:
+      enabled: true
+      database.existingSecretKey: UMAMI_DATABASE_URL
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef
+          value: { name: genesis-genesis-umami, key: DATABASE_URL }
+
+  - it: still writes DATABASE_URL into its own Secret whatever existingSecretKey says
+    set:
+      enabled: true
+      database.bundled: false
+      database.external.url: postgresql://umami:pw@db.example.test:5432/umami
+      database.existingSecretKey: UMAMI_DATABASE_URL
+    template: templates/secret.yaml
+    asserts:
+      - isNotEmpty:
+          path: stringData.DATABASE_URL
+      - notExists:
+          path: stringData.UMAMI_DATABASE_URL
+
   # ---------------------------------------------------------------------------
   # Managed identity (Microsoft Entra) against an existing customer database.
   # ---------------------------------------------------------------------------

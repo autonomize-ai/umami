@@ -163,7 +163,7 @@ generated — under managed identity none exists at all.
 | `database.external.schema` | `umami` | Isolates umami's tables inside a shared database. |
 | `serviceAccount.create` | `false` | `false` does **not** mean "no identity": with `name` also empty the pod inherits `global.serviceAccount.name` (`genesis-platform-sa`), which already has the workload-identity annotations and pull secrets. Set `true` only for a dedicated identity. |
 | `app.existingSecret` / `.existingSecretKey` | `""` / `APP_SECRET` | Read `APP_SECRET` from a Secret you manage. Required under GitOps. |
-| `database.existingSecret` / `.existingSecretKey` | `""` / `DATABASE_URL` | Read the connection string from a Secret you manage. Set the key to share the platform Secret — a namespaced name such as `UMAMI_DATABASE_URL` avoids colliding with other services in a Secret nearly every pod mounts. |
+| `database.existingSecret` / `.existingSecretKey` | `""` / `DATABASE_URL` | Read the connection string from a Secret you manage. Set the key to share the platform Secret — a namespaced name such as `UMAMI_DATABASE_URL` avoids colliding with other services in a Secret nearly every pod mounts. The key is read only with `existingSecret`; the chart's own Secret always uses `DATABASE_URL`. |
 | `postgresql.image.repository` | `cgr.dev/chainguard/postgres` | Chainguard base; repoint to the org ACR mirror if policy requires. |
 | `postgresql.image.digest` | pinned | Chainguard publishes only `latest` publicly, so the digest is pinned to stop a Postgres major bump landing on an existing PVC. Clear it to follow `tag`. |
 | `postgresql.auth.password` | `""` | Empty → a strong password is generated into the chart Secret on first install (reused on upgrade). No default credential ships. |
