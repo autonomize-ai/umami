@@ -311,6 +311,7 @@ staffSetup:
       cpu: 10m
       memory: 32Mi
     limits:
+      cpu: 500m
       memory: 64Mi
 
 # ---- Keycloak client --------------------------------------------------------
@@ -613,6 +614,7 @@ bridge:
     # left too little headroom. Only the limit is raised: scheduling uses the
     # request, which stays at 48Mi.
     limits:
+      cpu: "1"
       memory: 256Mi
 
 ingress:

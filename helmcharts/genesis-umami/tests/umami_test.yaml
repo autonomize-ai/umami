@@ -755,6 +755,127 @@ tests:
           path: spec.template.spec.containers[1].ports[0].containerPort
           value: 3001
 
+  # A container that omits a limit gets the namespace LimitRange default at admission,
+  # which on a quota-bound namespace is charged as if the container needed it.
+  - it: sets a CPU and memory limit on the bridge sidecar
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      bridge.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].resources.limits
+          value:
+            cpu: "1"
+            memory: 256Mi
+
+  # The pinned counts make a new container fail here until its limits are asserted too.
+  - it: gives every Deployment container a CPU and a memory limit
+    set:
+      enabled: true
+      bridge.enabled: true
+      staffSetup.enabled: true
+      keycloak.setup.enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 2
+      - exists:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+      - exists:
+          path: spec.template.spec.containers[0].resources.limits.memory
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.memory
+      - exists:
+          path: spec.template.spec.containers[1].resources.limits.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[1].resources.limits.cpu
+      - exists:
+          path: spec.template.spec.containers[1].resources.limits.memory
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[1].resources.limits.memory
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: gives the bundled Postgres container a CPU and a memory limit
+    set:
+      enabled: true
+      bridge.enabled: true
+      staffSetup.enabled: true
+      keycloak.setup.enabled: true
+    template: templates/postgresql.yaml
+    documentSelector:
+      path: kind
+      value: StatefulSet
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - exists:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+      - exists:
+          path: spec.template.spec.containers[0].resources.limits.memory
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.memory
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: gives both staff-setup Job containers a CPU and a memory limit
+    set:
+      enabled: true
+      bridge.enabled: true
+      staffSetup.enabled: true
+      keycloak.setup.enabled: true
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 1
+      - exists:
+          path: spec.template.spec.initContainers[0].resources.limits.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.initContainers[0].resources.limits.cpu
+      - exists:
+          path: spec.template.spec.initContainers[0].resources.limits.memory
+      - isNotNullOrEmpty:
+          path: spec.template.spec.initContainers[0].resources.limits.memory
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - exists:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+      - exists:
+          path: spec.template.spec.containers[0].resources.limits.memory
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.memory
+
+  - it: sets a CPU and memory limit on both staff-setup containers
+    set:
+      enabled: true
+      database.external.url: "postgresql://u:p@h:5432/d"
+      staffSetup.enabled: true
+      keycloak.setup.enabled: true
+    template: templates/staff-setup-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].resources.limits
+          value:
+            cpu: 500m
+            memory: 64Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits
+          value:
+            cpu: 500m
+            memory: 64Mi
+
   - it: points health probes at the base path the image was built with
     set:
       enabled: true
