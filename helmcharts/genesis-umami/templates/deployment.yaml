@@ -51,21 +51,12 @@ spec:
             {{- end }}
             # DATABASE_URL comes from the user's existingSecret when set,
             # otherwise from this chart's Secret.
-            {{- /* existingSecretKey names the key inside the user's Secret only:
-                 the chart's own Secret always writes DATABASE_URL
-                 (templates/secret.yaml), so a key override without an
-                 existingSecret must not be applied to it. Same split as
-                 APP_SECRET below. */}}
+            {{- /* Key rule in umami.databaseUrlSecretKeyRef, shared with the
+                 bridge. Same split as APP_SECRET below. */}}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  {{- if .Values.database.existingSecret }}
-                  name: {{ .Values.database.existingSecret }}
-                  key: {{ .Values.database.existingSecretKey | quote }}
-                  {{- else }}
-                  name: {{ include "umami.fullname" . }}
-                  key: "DATABASE_URL"
-                  {{- end }}
+                  {{- include "umami.databaseUrlSecretKeyRef" . | nindent 18 }}
             # APP_SECRET comes from app.existingSecret when set (the GitOps
             # path), otherwise from this chart's own Secret. It is never read
             # from database.existingSecret, which carries DATABASE_URL only.
@@ -259,11 +250,12 @@ spec:
                   key: {{ $queryDb.existingSecretKey | default "DATABASE_URL" | quote }}
             {{- else }}
             # Umami's own connection, read through read-only transactions.
+            {{- /* Same Secret and key as the umami container: the key override
+                   applies only to the user's existingSecret. */}}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "umami.secretName" . }}
-                  key: {{ .Values.database.existingSecretKey | quote }}
+                  {{- include "umami.databaseUrlSecretKeyRef" . | nindent 18 }}
             {{- end }}
             {{- if include "umami.usesManagedIdentity" . }}
             # Same Entra token auth as the umami container: a token per
