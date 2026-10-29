@@ -63,12 +63,21 @@ Usage: include "umami.image" (dict "img" .Values.image "registry" (include "umam
 {{- end -}}
 {{- end -}}
 
-{{/* Name of the Secret holding DATABASE_URL + APP_SECRET. */}}
-{{- define "umami.secretName" -}}
+{{/*
+secretKeyRef body (name + key) for DATABASE_URL, shared by every container that
+reads Umami's own connection. existingSecretKey names the key inside the user's
+database.existingSecret only: the chart's own Secret always writes DATABASE_URL
+(templates/secret.yaml), so a key override without an existingSecret must not
+be applied to it -- an umbrella can then preset the key for overlays that point
+at a shared Secret without breaking installs that let the chart own the URL.
+*/}}
+{{- define "umami.databaseUrlSecretKeyRef" -}}
 {{- if .Values.database.existingSecret -}}
-{{- .Values.database.existingSecret -}}
+name: {{ .Values.database.existingSecret }}
+key: {{ .Values.database.existingSecretKey | quote }}
 {{- else -}}
-{{- include "umami.fullname" . -}}
+name: {{ include "umami.fullname" . }}
+key: "DATABASE_URL"
 {{- end -}}
 {{- end -}}
 
