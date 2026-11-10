@@ -81,7 +81,9 @@ RUN adduser --system --uid 1001 nextjs
 # CVE-2026-63075 and CVE-2026-63076. This is the only stage that ships, so it is
 # the only stage that needs the upgrade, and it has to precede the curl install
 # so libcurl resolves against the patched libssl3. zlib is upgraded the same
-# way: the base ships 1.3.2-r0 (CVE-2026-85091, HIGH) and v3.24/main has r1.
+# way: the base ships 1.3.2-r0 (CVE-2026-85091, HIGH), and 1.3.2-r1 still has
+# CVE-2026-4738 (CRITICAL), so zlib carries a floor of 1.4-r0 (v3.24/main has it;
+# 3.3.0-mi.42 shipped 1.3.2-r1 and failed image-scanner-wiz run 127972).
 # curl carries a floor for the same reason: 8.22.0-r0 has CVE-2026-92392 (HIGH,
 # public exploit) and v3.24/main has 8.23.0-r0. The floor makes the build fail
 # instead of silently shipping the old curl if the mirror lags.
@@ -91,7 +93,7 @@ RUN adduser --system --uid 1001 nextjs
 # final image. pnpm is the only package manager needed at build and runtime.
 RUN set -x \
     && apk upgrade --no-cache libssl3 libcrypto3 zlib \
-    && apk add --no-cache 'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' libc6-compat \
+    && apk add --no-cache 'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' 'zlib>=1.4-r0' libc6-compat \
     && npm install -g pnpm@${PNPM_VERSION} \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
