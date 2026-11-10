@@ -50,7 +50,7 @@ RUN adduser --system --uid 1001 nextjs
 # vulnerable packages vendored inside the npm CLI are not shipped in the final
 # image. pnpm is the only package manager needed at build and runtime.
 RUN set -x \
-    && apk add --no-cache curl libc6-compat \
+    && apk add --no-cache curl libc6-compat 'zlib>=1.4-r0' \
     && npm install -g pnpm@${PNPM_VERSION} \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
