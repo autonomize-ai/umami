@@ -1,4 +1,7 @@
-ARG NODE_IMAGE_VERSION="22-alpine"
+# Node 22.23.5 (fixes CVE-2026-123864, -123865, -123866, -123872 in 22.23.4), pinned by tag
+# and digest so a rebuild cannot float; this digest is what node:22-alpine resolved to on
+# 2026-11-12. Bump tag and digest together.
+ARG NODE_IMAGE_VERSION="22.23.5-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a"
 # 11.28.8 bundles undici 6.29.1 in dist/node_modules; 11.28.2 bundled 6.28.1
 # (CVE-2026-109869 / GHSA-xjj6-f33q-929c, high), which image scanning reports
 # against /usr/local/lib/node_modules/pnpm in the runner stage.
