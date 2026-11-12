@@ -38,23 +38,11 @@ jobs:
     # Self-hosted pool: the multi-arch Next.js build is heavy and needs a real
     # Docker daemon with buildx.
     pool:
-      name: ad-vmss-p1
+      name: k8s-cicd-pool-pd1017
     steps:
       - checkout: self
         submodules: true
         persistCredentials: true
-
-      - script: |
-          sudo apt-get update
-          sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-          sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-          sudo apt-get update
-          sudo apt-get install -y docker-ce containerd.io
-          sudo systemctl start docker
-          sudo chmod 666 /var/run/docker.sock || true
-          docker version
-        displayName: Install Docker Engine
 
       - task: Docker@2
         displayName: Login to ACR
