@@ -119,6 +119,54 @@ test('https upstream: verified against the CA, refused with another', { skip }, 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('B4: switch off, the bridge makes the same request to the app as before (plain http, only method and headers)', () => {
+  const real = http.request;
+  const seen = [];
+  http.request = (...args) => { seen.push(args); return { on() {}, end() {} }; };
+  try {
+    const cb = () => {};
+    proxyRequest('http://127.0.0.1:3000', { method: 'POST', url: '/api/x?y=1', headers: { host: 'public.example', 'x-a': '1' } }, cb);
+  } finally {
+    http.request = real;
+  }
+  assert.equal(seen.length, 1);
+  const [url, options] = seen[0];
+  assert.equal(url, 'http://127.0.0.1:3000/api/x?y=1');
+  assert.deepEqual(options, { method: 'POST', headers: { host: 'public.example', 'x-a': '1' } });
+});
+
+test('A2/B6: an external host with an unknown CA behaves the same with TLS on as with it off, verify flag false included', { skip }, async () => {
+  const dir = mint();
+  // An "external" service signed by a CA the platform does not trust: self-signed.
+  const external = https.createServer({ key: fs.readFileSync(path.join(dir, 'other.key')), cert: fs.readFileSync(path.join(dir, 'other.crt')) }, ok);
+  const extPort = await listen(external);
+  const outbound = async () => {
+    const get = (opts) =>
+      new Promise((resolve) => {
+        https.get({ host: '127.0.0.1', port: extPort, path: '/', ...opts }, (res) => { res.resume(); resolve(`status ${res.statusCode}`); }).on('error', (e) => resolve(`error ${e.code}`));
+      });
+    return { unverified: await get({ rejectUnauthorized: false }), verified: await get({}) };
+  };
+  const before = await outbound();
+  // Switch on: the listener and the bridge's own upstream options are created.
+  const server = createListener(ok, { GENESIS_TLS_CERT: path.join(dir, 'tls.crt'), GENESIS_TLS_KEY: path.join(dir, 'tls.key') });
+  upstreamTlsOptions('https://localhost:3000');
+  try {
+    assert.deepEqual(await outbound(), before, 'outbound behaviour is unchanged by creating the TLS listener');
+    assert.equal(before.unverified, 'status 200');
+    assert.match(before.verified, /^error (DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE)$/);
+    assert.equal(https.globalAgent.options.ca, undefined, 'no CA is forced onto the global agent');
+    assert.equal(https.globalAgent.options.rejectUnauthorized, undefined, 'no verify setting is changed');
+    // The upstream pin applies only to the bridge's own app upstream; any other
+    // request keeps Node's own name selection.
+    assert.deepEqual(upstreamTlsOptions('http://external.example'), {});
+  } finally {
+    server.close();
+    external.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('proxy hop: a client Host header must not decide which name the app certificate is verified against', { skip }, async () => {
   const dir = mint();
   const server = createListener(ok, { GENESIS_TLS_CERT: path.join(dir, 'tls.crt'), GENESIS_TLS_KEY: path.join(dir, 'tls.key') });
