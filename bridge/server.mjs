@@ -29,7 +29,7 @@
  */
 
 import { queryDatabaseConfig, withReadOnly } from './db.mjs';
-import { createListener, requestFor } from './tls.mjs';
+import { createListener, proxyRequest } from './tls.mjs';
 import {
   DATA_TYPE_NAMES,
   QueryError,
@@ -1311,14 +1311,10 @@ function deny(res, status, message) {
 }
 
 function proxy(req, res) {
-  const upstream = requestFor(UMAMI)(
-    UMAMI + req.url,
-    { method: req.method, headers: req.headers },
-    up => {
-      res.writeHead(up.statusCode || 502, up.headers);
-      up.pipe(res);
-    },
-  );
+  const upstream = proxyRequest(UMAMI, req, up => {
+    res.writeHead(up.statusCode || 502, up.headers);
+    up.pipe(res);
+  });
 
   upstream.on('error', err => {
     log('upstream error:', err.message);

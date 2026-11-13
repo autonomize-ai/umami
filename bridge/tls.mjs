@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
 
 /** TLS server options from the environment, or undefined when TLS is off. */
 export function tlsOptionsFromEnv(env = process.env) {
@@ -45,4 +46,36 @@ export function createListener(handler, env = process.env) {
  */
 export function requestFor(url) {
   return String(url).startsWith('https:') ? https.request : http.request;
+}
+
+/**
+ * TLS options for a request to an https upstream. Node verifies the server
+ * certificate against the request's Host header when one is present, not against
+ * the URL's host, and the bridge forwards the client's Host header (the public
+ * hostname) to the app. Without an explicit servername every proxied request
+ * fails verification and the user gets a 502. The bridge verifies against a name
+ * it chooses: the upstream URL's own host. An IP host gets an empty servername,
+ * which makes Node verify against the certificate's IP SANs rather than the
+ * Host header (an IP is not a valid SNI name).
+ */
+export function upstreamTlsOptions(url) {
+  const u = new URL(url);
+  if (u.protocol !== 'https:') return {};
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  return { servername: net.isIP(host) ? '' : host };
+}
+
+/**
+ * The bridge's request to the app for a proxied client request: same method,
+ * path and headers (including the client's Host), with the upstream TLS name
+ * pinned by upstreamTlsOptions. server.mjs's proxy() calls this, so the tests
+ * exercise the real path. `extra` is for tests (a CA); in the pod, trust comes
+ * from NODE_EXTRA_CA_CERTS.
+ */
+export function proxyRequest(upstream, req, onResponse, extra = {}) {
+  return requestFor(upstream)(
+    upstream + req.url,
+    { method: req.method, headers: req.headers, ...upstreamTlsOptions(upstream), ...extra },
+    onResponse,
+  );
 }
