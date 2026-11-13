@@ -28,10 +28,8 @@
  * no second image to the build pipeline.
  */
 
-import http from 'node:http';
-
 import { queryDatabaseConfig, withReadOnly } from './db.mjs';
-import { createListener } from './tls.mjs';
+import { createListener, requestFor } from './tls.mjs';
 import {
   DATA_TYPE_NAMES,
   QueryError,
@@ -1313,7 +1311,7 @@ function deny(res, status, message) {
 }
 
 function proxy(req, res) {
-  const upstream = http.request(
+  const upstream = requestFor(UMAMI)(
     UMAMI + req.url,
     { method: req.method, headers: req.headers },
     up => {

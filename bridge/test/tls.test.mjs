@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { createListener, tlsOptionsFromEnv } from '../tls.mjs';
+import { createListener, requestFor, tlsOptionsFromEnv } from '../tls.mjs';
 
 let haveOpenssl = true;
 try {
@@ -87,6 +87,34 @@ test('tls on: verified client connects; wrong CA, wrong host and TLS 1.1 are ref
     get(port, { ca, servername: 'genesis-umami.test.svc', minVersion: 'TLSv1', maxVersion: 'TLSv1.1', ciphers: 'DEFAULT:@SECLEVEL=0' }),
     (e) => /protocol version|no protocols|alert|wrong version/i.test(e.message),
   );
+  server.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('requestFor picks the client from the upstream scheme', () => {
+  assert.equal(requestFor('http://127.0.0.1:3000'), http.request);
+  assert.equal(requestFor('https://localhost:3000'), https.request);
+});
+
+test('https upstream: verified against the CA, refused with another', { skip }, async () => {
+  const dir = mint();
+  const server = createListener(ok, { GENESIS_TLS_CERT: path.join(dir, 'tls.crt'), GENESIS_TLS_KEY: path.join(dir, 'tls.key') });
+  const port = await listen(server);
+  const url = `https://127.0.0.1:${port}/`;
+  const call = (ca) =>
+    new Promise((resolve, reject) => {
+      // The timeout makes a wrong client (plain http against this port) fail
+      // fast instead of hanging the test.
+      const req = requestFor(url)(url, { ca, servername: 'genesis-umami.test.svc', timeout: 3000 }, (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('timeout', () => req.destroy(new Error('upstream timeout')));
+      req.on('error', reject);
+      req.end();
+    });
+  assert.equal(await call(fs.readFileSync(path.join(dir, 'ca.crt'))), 200);
+  await assert.rejects(call(fs.readFileSync(path.join(dir, 'other.crt'))), /unable to verify|self.signed|issuer/i);
   server.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });

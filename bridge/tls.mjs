@@ -36,3 +36,13 @@ export function createListener(handler, env = process.env) {
   const options = tlsOptionsFromEnv(env);
   return options ? https.createServer(options, handler) : http.createServer(handler);
 }
+
+/**
+ * http.request or https.request for an upstream URL. The bridge reaches the app
+ * on loopback; with internal TLS the app serves HTTPS there too, and trust comes
+ * from NODE_EXTRA_CA_CERTS, so a failed verification is an upstream error, not a
+ * silent downgrade.
+ */
+export function requestFor(url) {
+  return String(url).startsWith('https:') ? https.request : http.request;
+}
