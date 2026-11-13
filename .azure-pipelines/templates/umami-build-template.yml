@@ -96,6 +96,19 @@ jobs:
         displayName: Assert @azure/identity is present in the image
         condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
 
+      # R7 per-image test for the internal-TLS listeners (AUTPE-8197, part F2).
+      # The pod runs the app (3000) and the bridge (3001) from this one image, so
+      # the script boots each with a throwaway CA and asserts TLS 1.2 ok, TLS 1.1
+      # refused, wrong CA / wrong hostname / plaintext rejected, the entry stays
+      # up (its plaintext guard has not fired), and a half-set config exits
+      # non-zero. Needs docker, openssl and python3 on the agent.
+      - script: |
+          set -e
+          IMAGE_NAME="${{ parameters.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ parameters.CONTAINER_NAME }}"
+          scripts/test-internal-tls-image.sh "$IMAGE_NAME:$(Build.BuildNumber)"
+        displayName: Internal TLS image test
+        condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
+
       - script: |
           git tag umami-$(Build.BuildNumber)
           git push origin umami-$(Build.BuildNumber)

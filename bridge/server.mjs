@@ -2041,7 +2041,7 @@ const server = createListener(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  log(`listening on ${PORT}, proxying ${UMAMI}, base path "${BASE_PATH || '/'}"`);
+  log(`listening on ${PORT}${process.env.GENESIS_TLS_CERT ? ' over TLS' : ''}, proxying ${UMAMI}, base path "${BASE_PATH || '/'}"`);
   // After listen, so a slow or unreachable authz cannot delay readiness.
   registerRoutes();
   log(
