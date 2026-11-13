@@ -6,12 +6,18 @@
 // minVersion TLSv1.2, restores the original at once, then loads the unmodified
 // server.js. With both unset it is a pass-through.
 //
-// Fail closed: a half-set pair or an unreadable file exits 1. It never falls
-// back to plain HTTP. .cjs because the package is "type": "module" and the
+// Fail closed, three ways. A half-set pair or an unreadable file exits 1. And
+// swapping http.createServer only works while Next builds its listener through
+// that one call, so a second guard watches every TCP listen: if anything other
+// than a TLS server starts listening (a Next upgrade that builds its server
+// another way), the process exits 1 instead of logging "TLS enabled" while
+// serving plaintext. .cjs because the package is "type": "module" and the
 // standalone server.js is CommonJS.
 const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
+const net = require("node:net");
+const tls = require("node:tls");
 const path = require("node:path");
 
 const certPath = process.env.GENESIS_TLS_CERT || "";
@@ -37,6 +43,22 @@ if (certPath || keyPath) {
     http.createServer = plainCreateServer;
     const listener = args.find((a) => typeof a === "function");
     return https.createServer({ key, cert, minVersion: "TLSv1.2" }, listener);
+  };
+
+  // Guard: a TCP listen on anything that is not a tls.Server is plaintext.
+  // https.Server extends tls.Server, so the swapped-in listener passes.
+  const plainListen = net.Server.prototype.listen;
+  net.Server.prototype.listen = function (...args) {
+    const first = args[0];
+    const tcp =
+      typeof first === "number" ||
+      (typeof first === "string" && /^\d+$/.test(first)) ||
+      (first !== null && typeof first === "object" && "port" in first);
+    if (tcp && !(this instanceof tls.Server)) {
+      console.error("Internal TLS is on but a plaintext TCP listener started; refusing to serve plaintext");
+      process.exit(1);
+    }
+    return plainListen.apply(this, args);
   };
   console.log("Internal TLS enabled (TLSv1.2+)");
 }

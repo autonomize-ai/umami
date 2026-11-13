@@ -26,6 +26,9 @@ try {
 }
 const skipTls = haveOpenssl ? false : 'openssl not installed';
 
+// STUB_KIND picks how the stub builds its listener. "create" is what Next does
+// today. The others stand in for a future Next that builds its server another
+// way: the entry must exit 1, not log "TLS enabled" and serve plaintext.
 const STUB = `
 const https = require('node:https');
 const real = https.createServer;
@@ -33,9 +36,13 @@ https.createServer = (o, l) => {
   console.log('OPTS ' + JSON.stringify({ minVersion: o.minVersion }));
   return real(o, l);
 };
-require('node:http')
-  .createServer((req, res) => res.end('ok'))
-  .listen(Number(process.env.PORT), '127.0.0.1', () => console.log('READY'));
+const handler = (req, res) => res.end('ok');
+const kind = process.env.STUB_KIND || 'create';
+const server =
+  kind === 'new-server' ? new (require('node:http').Server)(handler)
+  : kind === 'http2' ? require('node:http2').createServer(handler)
+  : require('node:http').createServer(handler);
+server.listen(Number(process.env.PORT), '127.0.0.1', () => console.log('READY'));
 `;
 
 // Same layout as the image: <root>/server.js and <root>/scripts/tls-server.cjs.
@@ -118,6 +125,30 @@ test('half-set pair or unreadable files: exit 1 with the message, never plain ht
       const r = spawnSync('node', ['scripts/tls-server.cjs'], { cwd: dir, env: { PATH: process.env.PATH, PORT: port, ...env }, timeout: 5000 });
       assert.equal(r.status, 1, JSON.stringify(env));
       assert.match(String(r.stderr), message);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TLS on but the server is built another way: exit 1, never plaintext', { skip: skipTls }, async () => {
+  const dir = workdir();
+  pki(dir);
+  const env = { GENESIS_TLS_CERT: join(dir, 'tls.crt'), GENESIS_TLS_KEY: join(dir, 'tls.key') };
+  try {
+    const port = String(await freePort());
+    for (const kind of ['new-server', 'http2']) {
+      // Without the guard the stub logs READY and answers plain http, so the
+      // child is still running when the timeout fires (status null).
+      const r = spawnSync('node', ['scripts/tls-server.cjs'], {
+        cwd: dir,
+        env: { PATH: process.env.PATH, PORT: port, STUB_KIND: kind, ...env },
+        timeout: 5000,
+        encoding: 'utf8',
+      });
+      assert.equal(r.status, 1, `${kind}: ${r.stdout}`);
+      assert.match(r.stderr, /refusing to serve plaintext/);
+      assert.ok(!r.stdout.includes('READY'), `${kind} must not reach READY`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
