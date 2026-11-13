@@ -107,6 +107,9 @@ jobs:
           IMAGE_NAME="${{ parameters.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ parameters.CONTAINER_NAME }}"
           scripts/test-internal-tls-image.sh "$IMAGE_NAME:$(Build.BuildNumber)"
         displayName: Internal TLS image test
+        # Bounded: a stalled pull or container start must fail the step, not hold the
+        # agent until the job-level timeout. The script's own waits are bounded too.
+        timeoutInMinutes: 15
         condition: and(succeeded(), in(variables['Build.Reason'], 'Manual', 'IndividualCI', 'BatchedCI'))
 
       - script: |
