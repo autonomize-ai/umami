@@ -245,7 +245,7 @@ tests:
       - notExists:
           path: spec.template.spec.initContainers
 
-  - it: on, the staff-setup Job reaches the app over https and trusts the customer CA in curl and node
+  - it: on, the staff-setup Job reaches the app over https and trusts the platform internal CA in curl and node
     template: templates/staff-setup-job.yaml
     set:
       global:
@@ -325,3 +325,150 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: keycloak.setup.url is plain http
+
+  # ---------------------------------------------------------------------------
+  # A2 (DONE.md): internal TLS changes only traffic to in-cluster hosts. A host
+  # outside the cluster (a customer-hosted Keycloak or authz) behaves exactly as
+  # with the switch off: no refusal to render, no CA forced, URL untouched.
+  # In-cluster = a bare Service name, *.svc, *.svc.cluster.local, localhost,
+  # 127.0.0.1.
+  # ---------------------------------------------------------------------------
+  - it: on, an external plain-http authz and Keycloak URL still render, and are passed through untouched
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://authz.platform.example.com"
+      keycloak:
+        setup:
+          url: "http://idp.example.com/auth"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: AUTHZ_INTERNAL_URL
+            value: "http://authz.platform.example.com"
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: KC_URL
+            value: "http://idp.example.com/auth"
+        template: templates/staff-setup-job.yaml
+
+  - it: on, an external https Keycloak keeps curl's own trust store (no CURL_CA_BUNDLE replacing it)
+    template: templates/staff-setup-job.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      keycloak:
+        setup:
+          url: "https://login.example.com/auth"
+    asserts:
+      - notContains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: CURL_CA_BUNDLE
+            value: /etc/genesis/internal-tls/ca.crt
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: KC_URL
+            value: "https://login.example.com/auth"
+
+  - it: on, an in-cluster Keycloak URL gets the platform internal CA for curl
+    template: templates/staff-setup-job.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      keycloak:
+        setup:
+          url: "https://genesis-idp.genesis-develop.svc:8443/auth"
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: CURL_CA_BUNDLE
+            value: /etc/genesis/internal-tls/ca.crt
+
+  - it: on, plain http to a bare Service name fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: on, plain http to genesis-authz.ns.svc fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz.genesis-develop.svc:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: on, plain http to a .svc.cluster.local name fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz.genesis-develop.svc.cluster.local:8000/x"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: on, plain http to localhost fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://localhost:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: on, plain http to 127.0.0.1 fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://127.0.0.1:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: off, plain-http in-cluster URLs render exactly as before (the guard only runs with the switch on)
+    template: templates/deployment.yaml
+    set:
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz:8000"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: AUTHZ_INTERNAL_URL
+            value: "http://genesis-authz:8000"

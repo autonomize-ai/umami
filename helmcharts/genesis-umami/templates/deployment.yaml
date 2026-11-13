@@ -37,7 +37,7 @@ spec:
       {{- if and .Values.bridge.enabled (include "umami.internalTls.mergeCA" .) }}
       initContainers:
         # NODE_EXTRA_CA_CERTS takes one file; the app already uses it for the
-        # Redis CA. The bridge needs the customer CA (authz, loopback to the app)
+        # Redis CA. The bridge needs the platform internal CA (authz, loopback to the app)
         # and the Redis CA, so write one file with both. Same image as the app,
         # no new component. Fails closed: a missing or empty input exits non-zero
         # and the pod never starts.

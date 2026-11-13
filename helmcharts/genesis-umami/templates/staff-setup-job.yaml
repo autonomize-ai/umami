@@ -80,7 +80,10 @@ spec:
           env:
             - name: KC_URL
               value: {{ .Values.keycloak.setup.url | quote }}
-            {{- if include "umami.internalTls.enabled" . }}
+            {{- /* Only for an in-cluster Keycloak. CURL_CA_BUNDLE REPLACES curl's trust
+                   store, so setting it for any other host would stop a Keycloak behind
+                   a public CA working (DONE.md A2, A3). */}}
+            {{- if and (include "umami.internalTls.enabled" .) (include "umami.internalTls.isInternalUrl" .Values.keycloak.setup.url) }}
             - name: CURL_CA_BUNDLE
               value: /etc/genesis/internal-tls/ca.crt
             {{- end }}
@@ -136,8 +139,9 @@ spec:
               value: {{ printf "%s://%s:%v%s" (ternary "https" "http" (not (empty (include "umami.internalTls.enabled" .)))) (include "umami.fullname" .) .Values.service.port (trimSuffix "/" .Values.basePath) | quote }}
             {{- if include "umami.internalTls.enabled" . }}
             {{- /* The script calls curl and `node -e`. curl wants CURL_CA_BUNDLE, node
-                   wants NODE_EXTRA_CA_CERTS; both read the customer CA, and every
-                   call here is in-cluster so no public roots are needed. */}}
+                   wants NODE_EXTRA_CA_CERTS; both read the platform internal CA. Every
+                   call this container makes goes to the umami Service, so replacing curl's
+                   store is safe here. */}}
             - name: CURL_CA_BUNDLE
               value: /etc/genesis/internal-tls/ca.crt
             - name: NODE_EXTRA_CA_CERTS

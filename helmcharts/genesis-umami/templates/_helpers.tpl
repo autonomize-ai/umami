@@ -458,7 +458,7 @@ Off unless global.internalTls.enabled; off renders exactly what it did before.
 
 {{/*
 NODE_EXTRA_CA_CERTS accepts one file and the app already uses it for the Redis
-CA. When both exist the bridge gets a merged file (customer CA + Redis CA)
+CA. When both exist the bridge gets a merged file (platform internal CA + Redis CA)
 written at pod start by an init container; otherwise it points at ca.crt.
 */}}
 {{- define "umami.internalTls.mergeCA" -}}
@@ -470,17 +470,35 @@ written at pod start by an init container; otherwise it points at ca.crt.
 {{- end -}}
 
 {{/*
-Fail at render, not at runtime, when internal TLS is on but an in-cluster URL
+True when a URL's host is in-cluster: a bare Service name (no dot), *.svc,
+*.svc.cluster.local, localhost or 127.0.0.1. This is the one predicate for
+"internal" (DONE.md A1). Internal TLS changes only traffic to such hosts: any
+other host (a customer-hosted Keycloak or authz, say) behaves exactly as it does
+with the switch off, so nothing below refuses, rewrites or adds a CA for it.
+*/}}
+{{- define "umami.internalTls.isInternalUrl" -}}
+{{- $h := regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" (. | toString) "" -}}
+{{- $h = regexReplaceAll "[/?#].*$" $h "" -}}
+{{- $h = regexReplaceAll "^[^@]*@" $h "" -}}
+{{- $h = regexReplaceAll ":[0-9]+$" $h "" -}}
+{{- if or (not (contains "." $h)) (hasSuffix ".svc" $h) (hasSuffix ".svc.cluster.local" $h) (eq $h "localhost") (eq $h "127.0.0.1") -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Fail at render, not at runtime, when internal TLS is on but an IN-CLUSTER URL
 this chart calls is still plain http. Those URLs come from values (the umbrella
-sets them); a stale one would pass every probe and send plaintext.
+sets them); a stale one would pass every probe and send plaintext. A URL to any
+other host is left alone (see isInternalUrl).
 */}}
 {{- define "umami.internalTls.validate" -}}
 {{- if include "umami.internalTls.enabled" . -}}
-{{- if and .Values.bridge.enabled .Values.bridge.routeRegistration.enabled (hasPrefix "http://" (.Values.bridge.routeRegistration.url | default "")) -}}
-{{- fail "global.internalTls.enabled is true but bridge.routeRegistration.url is plain http; set an https:// URL" -}}
+{{- $authz := .Values.bridge.routeRegistration.url | default "" -}}
+{{- if and .Values.bridge.enabled .Values.bridge.routeRegistration.enabled (hasPrefix "http://" $authz) (include "umami.internalTls.isInternalUrl" $authz) -}}
+{{- fail "global.internalTls.enabled is true but bridge.routeRegistration.url is plain http to an in-cluster host; set an https:// URL" -}}
 {{- end -}}
-{{- if and .Values.staffSetup.enabled .Values.keycloak.setup.enabled (hasPrefix "http://" (.Values.keycloak.setup.url | default "")) -}}
-{{- fail "global.internalTls.enabled is true but keycloak.setup.url is plain http; set an https:// URL" -}}
+{{- $kc := .Values.keycloak.setup.url | default "" -}}
+{{- if and .Values.staffSetup.enabled .Values.keycloak.setup.enabled (hasPrefix "http://" $kc) (include "umami.internalTls.isInternalUrl" $kc) -}}
+{{- fail "global.internalTls.enabled is true but keycloak.setup.url is plain http to an in-cluster host; set an https:// URL" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
