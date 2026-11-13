@@ -1,6 +1,7 @@
 #!/bin/sh
 # Container startup: run the one-shot DB check/migration and tracker update, then
-# exec the long-running server so it replaces this shell as PID 1.
+# exec the long-running server so it replaces this shell as PID 1. tls-server.cjs
+# is `node server.js` unless GENESIS_TLS_CERT/KEY are set (internal TLS).
 #
 # This avoids `npm-run-all` keeping idle `npm`/`npm-run-all` parent processes
 # resident for the lifetime of the container (each a full Node VM holding tens
@@ -13,4 +14,4 @@ export PATH="$PWD/node_modules/.bin:$PATH"
 
 node scripts/check-db.js
 node scripts/update-tracker.js
-exec node server.js
+exec node scripts/tls-server.cjs
