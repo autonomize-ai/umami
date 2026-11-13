@@ -80,6 +80,10 @@ spec:
           env:
             - name: KC_URL
               value: {{ .Values.keycloak.setup.url | quote }}
+            {{- if include "umami.internalTls.enabled" . }}
+            - name: CURL_CA_BUNDLE
+              value: /etc/genesis/internal-tls/ca.crt
+            {{- end }}
             - name: KC_REALM
               value: {{ .Values.keycloak.setup.realm | quote }}
             - name: CLIENT_ID
@@ -113,6 +117,9 @@ spec:
           volumeMounts:
             - name: keycloak-setup-script
               mountPath: /scripts
+            {{- if include "umami.internalTls.enabled" . }}
+            {{- include "umami.internalTls.volumeMount" . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.staffSetup.resources | nindent 12 }}
       {{- end }}
@@ -126,7 +133,16 @@ spec:
           env:
             # The Service, not loopback: this Job runs in its own pod.
             - name: UMAMI_URL
-              value: {{ printf "http://%s:%v%s" (include "umami.fullname" .) .Values.service.port (trimSuffix "/" .Values.basePath) | quote }}
+              value: {{ printf "%s://%s:%v%s" (ternary "https" "http" (not (empty (include "umami.internalTls.enabled" .)))) (include "umami.fullname" .) .Values.service.port (trimSuffix "/" .Values.basePath) | quote }}
+            {{- if include "umami.internalTls.enabled" . }}
+            {{- /* The script calls curl and `node -e`. curl wants CURL_CA_BUNDLE, node
+                   wants NODE_EXTRA_CA_CERTS; both read the customer CA, and every
+                   call here is in-cluster so no public roots are needed. */}}
+            - name: CURL_CA_BUNDLE
+              value: /etc/genesis/internal-tls/ca.crt
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/genesis/internal-tls/ca.crt
+            {{- end }}
             - name: STAFF_USER
               value: {{ .Values.staffSetup.username | quote }}
             {{- /* Always admin: it sees every org's site without joining any
@@ -158,6 +174,9 @@ spec:
           volumeMounts:
             - name: staff-setup-script
               mountPath: /scripts
+            {{- if include "umami.internalTls.enabled" . }}
+            {{- include "umami.internalTls.volumeMount" . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.staffSetup.resources | nindent 12 }}
       volumes:
@@ -170,6 +189,9 @@ spec:
           configMap:
             name: {{ include "umami.fullname" . }}-keycloak-setup
             defaultMode: 0555
+        {{- end }}
+        {{- if include "umami.internalTls.enabled" . }}
+        {{- include "umami.internalTls.volume" . | nindent 8 }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

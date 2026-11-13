@@ -411,3 +411,76 @@ read. Renders nothing when no list applies.
 {{- end -}}
 {{- with $tolerations }}{{ toYaml . }}{{ end -}}
 {{- end -}}
+
+{{/*
+Internal TLS (AUTPE-8197, part F2). This chart ships standalone with no
+genesis-lib dependency, so it copies the names and paths of genesis-lib's
+internalTls helpers (INTERFACE.md): one Secret, `genesis-internal-tls`, keys
+tls.crt, tls.key and ca.crt, mounted read-only at /etc/genesis/internal-tls.
+Off unless global.internalTls.enabled; off renders exactly what it did before.
+*/}}
+{{- define "umami.internalTls.enabled" -}}
+{{- if dig "internalTls" "enabled" false (.Values.global | default dict) -}}true{{- end -}}
+{{- end -}}
+
+{{/* "HTTPS" when internal TLS is on, else "HTTP". */}}
+{{- define "umami.internalTls.probeScheme" -}}
+{{- if include "umami.internalTls.enabled" . -}}HTTPS{{- else -}}HTTP{{- end -}}
+{{- end -}}
+
+{{- define "umami.internalTls.secretName" -}}
+{{- dig "internalTls" "secretName" "genesis-internal-tls" (.Values.global | default dict) -}}
+{{- end -}}
+
+{{/* GENESIS_TLS_* env entries (list items, no indentation). */}}
+{{- define "umami.internalTls.env" -}}
+- name: GENESIS_TLS_CERT
+  value: /etc/genesis/internal-tls/tls.crt
+- name: GENESIS_TLS_KEY
+  value: /etc/genesis/internal-tls/tls.key
+- name: GENESIS_TLS_CA
+  value: /etc/genesis/internal-tls/ca.crt
+{{- end -}}
+
+{{- define "umami.internalTls.volumeMount" -}}
+- name: internal-tls
+  mountPath: /etc/genesis/internal-tls
+  readOnly: true
+{{- end -}}
+
+{{/* The pod volume. 0440: the pod's fsGroup (podSecurityContext) makes it readable. */}}
+{{- define "umami.internalTls.volume" -}}
+- name: internal-tls
+  secret:
+    secretName: {{ include "umami.internalTls.secretName" . | quote }}
+    defaultMode: 0440
+{{- end -}}
+
+{{/*
+NODE_EXTRA_CA_CERTS accepts one file and the app already uses it for the Redis
+CA. When both exist the bridge gets a merged file (customer CA + Redis CA)
+written at pod start by an init container; otherwise it points at ca.crt.
+*/}}
+{{- define "umami.internalTls.mergeCA" -}}
+{{- if and (include "umami.internalTls.enabled" .) .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName -}}true{{- end -}}
+{{- end -}}
+
+{{- define "umami.internalTls.caFile" -}}
+{{- if include "umami.internalTls.mergeCA" . -}}/etc/genesis/ca-bundle/bundle.pem{{- else -}}/etc/genesis/internal-tls/ca.crt{{- end -}}
+{{- end -}}
+
+{{/*
+Fail at render, not at runtime, when internal TLS is on but an in-cluster URL
+this chart calls is still plain http. Those URLs come from values (the umbrella
+sets them); a stale one would pass every probe and send plaintext.
+*/}}
+{{- define "umami.internalTls.validate" -}}
+{{- if include "umami.internalTls.enabled" . -}}
+{{- if and .Values.bridge.enabled .Values.bridge.routeRegistration.enabled (hasPrefix "http://" (.Values.bridge.routeRegistration.url | default "")) -}}
+{{- fail "global.internalTls.enabled is true but bridge.routeRegistration.url is plain http; set an https:// URL" -}}
+{{- end -}}
+{{- if and .Values.staffSetup.enabled .Values.keycloak.setup.enabled (hasPrefix "http://" (.Values.keycloak.setup.url | default "")) -}}
+{{- fail "global.internalTls.enabled is true but keycloak.setup.url is plain http; set an https:// URL" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

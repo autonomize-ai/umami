@@ -1,4 +1,5 @@
 {{- if .Values.enabled }}
+{{- include "umami.internalTls.validate" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,6 +34,34 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if and .Values.bridge.enabled (include "umami.internalTls.mergeCA" .) }}
+      initContainers:
+        # NODE_EXTRA_CA_CERTS takes one file; the app already uses it for the
+        # Redis CA. The bridge needs the customer CA (authz, loopback to the app)
+        # and the Redis CA, so write one file with both. Same image as the app,
+        # no new component. Fails closed: a missing or empty input exits non-zero
+        # and the pod never starts.
+        - name: ca-bundle
+          image: {{ include "umami.image" (dict "img" .Values.image "registry" (include "umami.imageRegistry" .)) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - sh
+            - -ec
+            - |
+              for f in /etc/genesis/internal-tls/ca.crt /etc/redis-ca/ca.crt; do
+                [ -s "$f" ] || { echo "missing or empty $f" >&2; exit 1; }
+              done
+              { cat /etc/genesis/internal-tls/ca.crt; echo; cat /etc/redis-ca/ca.crt; } > /etc/genesis/ca-bundle/bundle.pem
+          volumeMounts:
+            {{- include "umami.internalTls.volumeMount" . | nindent 12 }}
+            - name: redis-ca
+              mountPath: /etc/redis-ca
+              readOnly: true
+            - name: ca-bundle
+              mountPath: /etc/genesis/ca-bundle
+      {{- end }}
       containers:
         - name: umami
           image: {{ include "umami.image" (dict "img" .Values.image "registry" (include "umami.imageRegistry" .)) | quote }}
@@ -113,14 +142,23 @@ spec:
               value: /etc/redis-ca/ca.crt
             {{- end }}
             {{- end }}
+            {{- if include "umami.internalTls.enabled" . }}
+            {{- include "umami.internalTls.env" . | nindent 12 }}
+            {{- end }}
             {{- with .Values.app.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if and .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName }}
+          {{- $redisCA := and .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName }}
+          {{- if or $redisCA (include "umami.internalTls.enabled" .) }}
           volumeMounts:
+            {{- if $redisCA }}
             - name: redis-ca
               mountPath: /etc/redis-ca
               readOnly: true
+            {{- end }}
+            {{- if include "umami.internalTls.enabled" . }}
+            {{- include "umami.internalTls.volumeMount" . | nindent 12 }}
+            {{- end }}
           {{- end }}
           ports:
             - name: http
@@ -133,12 +171,18 @@ spec:
             httpGet:
               path: {{ printf "%s/api/heartbeat" (trimSuffix "/" .Values.basePath) }}
               port: http
+              {{- if include "umami.internalTls.enabled" . }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: {{ printf "%s/api/heartbeat" (trimSuffix "/" .Values.basePath) }}
               port: http
+              {{- if include "umami.internalTls.enabled" . }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 30
             periodSeconds: 20
           resources:
@@ -166,7 +210,14 @@ spec:
             # Talks to the app container over the pod's loopback, so the
             # bridge never depends on the Service that fronts it.
             - name: UMAMI_INTERNAL_URL
-              value: "http://127.0.0.1:3000"
+              {{- /* localhost, not 127.0.0.1: the certificate carries DNS names
+                     (D2 adds localhost), and an IP would fail verification. */}}
+              value: {{ if include "umami.internalTls.enabled" . }}"https://localhost:3000"{{ else }}"http://127.0.0.1:3000"{{ end }}
+            {{- if include "umami.internalTls.enabled" . }}
+            {{- include "umami.internalTls.env" . | nindent 12 }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: {{ include "umami.internalTls.caFile" . | quote }}
+            {{- end }}
             - name: BASE_PATH
               value: {{ trimSuffix "/" .Values.basePath | quote }}
             - name: BRIDGE_REQUIRED_ROLE
@@ -341,25 +392,51 @@ spec:
             httpGet:
               path: /bridge-healthz
               port: bridge
+              {{- if include "umami.internalTls.enabled" . }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /bridge-healthz
               port: bridge
+              {{- if include "umami.internalTls.enabled" . }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 15
             periodSeconds: 20
+          {{- if include "umami.internalTls.enabled" . }}
+          volumeMounts:
+            {{- include "umami.internalTls.volumeMount" . | nindent 12 }}
+            {{- if include "umami.internalTls.mergeCA" . }}
+            - name: ca-bundle
+              mountPath: /etc/genesis/ca-bundle
+              readOnly: true
+            {{- end }}
+          {{- end }}
           resources:
             {{- toYaml .Values.bridge.resources | nindent 12 }}
         {{- end }}
-      {{- if and .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName }}
+      {{- $redisCA := and .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName }}
+      {{- if or $redisCA (include "umami.internalTls.enabled" .) }}
       volumes:
+        {{- if $redisCA }}
         - name: redis-ca
           secret:
             secretName: {{ .Values.redis.caCert.secretName | quote }}
             items:
               - key: ca.crt
                 path: ca.crt
+        {{- end }}
+        {{- if include "umami.internalTls.enabled" . }}
+        {{- include "umami.internalTls.volume" . | nindent 8 }}
+        {{- if and .Values.bridge.enabled (include "umami.internalTls.mergeCA" .) }}
+        - name: ca-bundle
+          emptyDir:
+            sizeLimit: 1Mi
+        {{- end }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
