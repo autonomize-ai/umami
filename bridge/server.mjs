@@ -31,6 +31,7 @@
 import http from 'node:http';
 
 import { queryDatabaseConfig, withReadOnly } from './db.mjs';
+import { createListener } from './tls.mjs';
 import {
   DATA_TYPE_NAMES,
   QueryError,
@@ -1923,7 +1924,7 @@ async function mintTenantBrowserToken(req) {
   return { token: body.token, landing: `/teams/${teamId}/websites` };
 }
 
-const server = http.createServer(async (req, res) => {
+const server = createListener(async (req, res) => {
   // Liveness for the sidecar itself. Deliberately before every other check so
   // kubelet never needs a role header.
   if (req.url === '/bridge-healthz') {
