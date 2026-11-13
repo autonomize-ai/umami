@@ -261,6 +261,24 @@ test('A3: NODE_EXTRA_CA_CERTS adds the platform CA to the default roots and remo
   }
 });
 
+// DONE.md D11 (blank column): every one of the three variables, empty and whitespace only.
+for (const name of ['GENESIS_TLS_CERT', 'GENESIS_TLS_KEY', 'GENESIS_TLS_CA']) {
+  for (const value of ['', '   ']) {
+    test(`D11: ${name} present and blank (${JSON.stringify(value)}) is refused, not read as off`, async () => {
+      const dir = workdir();
+      try {
+        const port = String(await freePort());
+        const r = spawnSync('node', ['scripts/tls-server.cjs'], { cwd: dir, env: { PATH: process.env.PATH, PORT: port, [name]: value }, timeout: 5000, encoding: 'utf8' });
+        assert.equal(r.status, 1, r.stdout);
+        assert.match(r.stderr, new RegExp(`${name}.*blank`));
+        assert.ok(!r.stdout.includes('READY'), 'must not have started serving');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
 test('TLS on: pinned to 1.2, CA-verified client served, bad CA, bad name, TLS 1.1 and plain http refused', { skip: skipTls }, async () => {
   const dir = workdir();
   pki(dir);

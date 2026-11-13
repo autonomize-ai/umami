@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { createListener, proxyRequest, requestFor, tlsOptionsFromEnv, upstreamTlsOptions } from '../tls.mjs';
+import { createListener, proxyRequest, requestFor, tlsEnabled, tlsOptionsFromEnv, upstreamTlsOptions } from '../tls.mjs';
 
 let haveOpenssl = true;
 try {
@@ -55,6 +55,26 @@ test('both variables unset: plain http, unchanged', async () => {
   const status = await new Promise((r) => http.get({ host: '127.0.0.1', port }, (res) => { res.resume(); r(res.statusCode); }));
   assert.equal(status, 200);
   server.close();
+});
+
+// DONE.md D11: absent = off, present and blank = refuse to start, present and set = on, for each of
+// GENESIS_TLS_CERT / KEY / CA. "Blank" is empty or whitespace only. Absent and set are the tests above
+// and below (plain http with {}; the TLS-on tests with real material); this is the blank column.
+for (const name of ['GENESIS_TLS_CERT', 'GENESIS_TLS_KEY', 'GENESIS_TLS_CA']) {
+  for (const value of ['', '   ']) {
+    test(`D11: ${name} present and blank (${JSON.stringify(value)}) is refused, not read as off`, () => {
+      const env = { [name]: value };
+      assert.throws(() => tlsEnabled(env), new RegExp(`${name} is set but blank`));
+      assert.throws(() => tlsOptionsFromEnv(env), new RegExp(`${name} is set but blank`));
+      assert.throws(() => createListener(ok, env), new RegExp(`${name} is set but blank`));
+    });
+  }
+}
+
+test('D11: absent is off, and a present non-blank value is on', () => {
+  assert.equal(tlsEnabled({}), false);
+  assert.equal(tlsEnabled({ GENESIS_TLS_CA: '/ca.crt' }), false, 'a CA alone does not turn the listener on');
+  assert.equal(tlsEnabled({ GENESIS_TLS_CERT: '/c', GENESIS_TLS_KEY: '/k' }), true);
 });
 
 test('only one of cert and key set: throws, never falls back to http', () => {

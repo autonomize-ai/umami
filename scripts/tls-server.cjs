@@ -20,11 +20,22 @@ const net = require("node:net");
 const tls = require("node:tls");
 const path = require("node:path");
 
-const certPath = process.env.GENESIS_TLS_CERT || "";
-const keyPath = process.env.GENESIS_TLS_KEY || "";
+// Switch state (DONE.md D11): GENESIS_TLS_CERT / KEY / CA absent = off; present and blank = refuse to
+// start; present and set = on. Presence is tested with hasOwnProperty, never truthiness: a blank value
+// is a misconfiguration, and treating it as "off" would serve plaintext from a pod believed encrypted.
+const present = (name) => Object.prototype.hasOwnProperty.call(process.env, name);
+const blank = ["GENESIS_TLS_CERT", "GENESIS_TLS_KEY", "GENESIS_TLS_CA"].filter(
+  (n) => present(n) && process.env[n].trim() === "",
+);
+if (blank.length) {
+  console.error(`${blank.join(", ")} is set but blank: unset it to turn internal TLS off, or give it a value`);
+  process.exit(1);
+}
+const certPath = process.env.GENESIS_TLS_CERT;
+const keyPath = process.env.GENESIS_TLS_KEY;
 
-if (certPath || keyPath) {
-  if (!certPath || !keyPath) {
+if (certPath !== undefined || keyPath !== undefined) {
+  if (certPath === undefined || keyPath === undefined) {
     console.error("GENESIS_TLS_CERT and GENESIS_TLS_KEY must both be set");
     process.exit(1);
   }

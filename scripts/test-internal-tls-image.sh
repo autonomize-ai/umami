@@ -77,6 +77,21 @@ PY
 
 half_set "app entry" scripts/tls-server.cjs
 half_set "bridge" bridge/server.mjs
+
+# D11: a present but blank variable must exit non-zero, never be read as off.
+blank_case() { # label, command...
+  local label=$1; shift
+  for v in GENESIS_TLS_CERT GENESIS_TLS_KEY GENESIS_TLS_CA; do
+    set +e
+    timeout 60 docker run --rm --user 65532:65532 "${APP_ENV[@]}" -e "$v=" --entrypoint node "$IMAGE" "$@" >/dev/null 2>&1
+    local rc=$?
+    set -e
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then echo "FAIL $label: blank $v did not exit non-zero (rc=$rc)"; exit 1; fi
+    echo "ok   $label: blank $v exits $rc"
+  done
+}
+blank_case "app entry" scripts/tls-server.cjs
+blank_case "bridge" bridge/server.mjs
 probe_listener "app (3000)" 3000 "Internal TLS enabled" / 999 scripts/tls-server.cjs
 probe_listener "bridge (3001)" 3001 "over TLS" /bridge-healthz 200 bridge/server.mjs
 echo "PASS $IMAGE"

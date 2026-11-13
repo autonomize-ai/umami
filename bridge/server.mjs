@@ -29,7 +29,7 @@
  */
 
 import { queryDatabaseConfig, withReadOnly } from './db.mjs';
-import { createListener, proxyRequest } from './tls.mjs';
+import { createListener, proxyRequest, tlsEnabled } from './tls.mjs';
 import {
   DATA_TYPE_NAMES,
   QueryError,
@@ -2041,7 +2041,7 @@ const server = createListener(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  log(`listening on ${PORT}${process.env.GENESIS_TLS_CERT ? ' over TLS' : ''}, proxying ${UMAMI}, base path "${BASE_PATH || '/'}"`);
+  log(`listening on ${PORT}${tlsEnabled() ? ' over TLS' : ''}, proxying ${UMAMI}, base path "${BASE_PATH || '/'}"`);
   // After listen, so a slow or unreachable authz cannot delay readiness.
   registerRoutes();
   log(

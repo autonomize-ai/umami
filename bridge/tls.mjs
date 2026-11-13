@@ -13,14 +13,35 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 
+// Switch state (DONE.md D11), for each of GENESIS_TLS_CERT, GENESIS_TLS_KEY, GENESIS_TLS_CA:
+// absent = off; present and blank (empty or whitespace only) = refuse to start; present and set = on.
+// Presence is tested with hasOwnProperty, never truthiness: a blank value is a misconfiguration (an
+// empty render of the Secret, say) and reading it as "off" would serve plaintext from a pod everyone
+// believes is encrypted.
+const NAMES = ['GENESIS_TLS_CERT', 'GENESIS_TLS_KEY', 'GENESIS_TLS_CA'];
+const present = (env, name) => Object.prototype.hasOwnProperty.call(env, name);
+
+function assertNoBlank(env) {
+  const blank = NAMES.filter((n) => present(env, n) && String(env[n]).trim() === '');
+  if (blank.length) {
+    throw new Error(`${blank.join(', ')} is set but blank: unset it to turn internal TLS off, or give it a value`);
+  }
+}
+
+/** True when internal TLS is on (cert or key present). Throws on a blank variable. */
+export function tlsEnabled(env = process.env) {
+  assertNoBlank(env);
+  return present(env, 'GENESIS_TLS_CERT') || present(env, 'GENESIS_TLS_KEY');
+}
+
 /** TLS server options from the environment, or undefined when TLS is off. */
 export function tlsOptionsFromEnv(env = process.env) {
-  const certPath = env.GENESIS_TLS_CERT || '';
-  const keyPath = env.GENESIS_TLS_KEY || '';
-  if (!certPath && !keyPath) return undefined;
-  if (!certPath || !keyPath) {
+  if (!tlsEnabled(env)) return undefined;
+  if (!present(env, 'GENESIS_TLS_CERT') || !present(env, 'GENESIS_TLS_KEY')) {
     throw new Error('GENESIS_TLS_CERT and GENESIS_TLS_KEY must both be set');
   }
+  const certPath = env.GENESIS_TLS_CERT;
+  const keyPath = env.GENESIS_TLS_KEY;
   try {
     return {
       cert: fs.readFileSync(certPath),
