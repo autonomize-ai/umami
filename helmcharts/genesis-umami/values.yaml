@@ -7,6 +7,13 @@
 # =============================================================================
 
 # Mirror of the umbrella condition so the subchart can also be used standalone.
+# Internal TLS (AUTPE-8197, part F2) is read from the umbrella's
+# `global.internalTls` (this chart has no genesis-lib dependency, so it copies the
+# convention): `enabled` (default false), `secretName` (default
+# genesis-internal-tls; keys tls.crt, tls.key, ca.crt, mounted read-only at
+# /etc/genesis/internal-tls). When enabled, the app (3000) and the bridge (3001)
+# both serve TLS 1.2+, probes use HTTPS, and bridge.routeRegistration.url and
+# keycloak.setup.url must be https:// or the render fails.
 enabled: false
 
 replicaCount: 1

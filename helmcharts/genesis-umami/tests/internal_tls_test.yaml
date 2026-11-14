@@ -1,0 +1,488 @@
+suite: genesis-umami internal TLS (AUTPE-8197, part F2)
+release:
+  name: genesis
+  namespace: genesis
+templates:
+  - templates/deployment.yaml
+  - templates/staff-setup-job.yaml
+  - templates/service.yaml
+set:
+  enabled: true
+  bridge:
+    enabled: true
+    routeRegistration:
+      enabled: true
+      url: "https://genesis-authz:8000"
+  staffSetup:
+    enabled: true
+  keycloak:
+    setup:
+      enabled: true
+      url: "https://genesis-idp:8443/auth"
+  redis:
+    enabled: true
+    tls: true
+    host: redis.example
+    caCert:
+      secretName: redis-ca-secret
+  database:
+    existingSecret: dbsec
+  app:
+    existingSecret: appsec
+tests:
+  # ---------------------------------------------------------------------------
+  # Off (the shipped default): the switch leaves no trace. The byte-for-byte
+  # comparison against the previous chart's render was done with `helm template`
+  # (see the PR); these pin the pieces a regression would most likely leak.
+  # ---------------------------------------------------------------------------
+  - it: off, the bridge dials the app on plain loopback and nothing mounts the TLS Secret
+    template: templates/deployment.yaml
+    set:
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz:8000"
+      keycloak:
+        setup:
+          url: "http://genesis-idp:8080/auth"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: UMAMI_INTERNAL_URL
+            value: "http://127.0.0.1:3000"
+      - notExists:
+          path: spec.template.spec.initContainers
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: internal-tls
+            secret:
+              secretName: "genesis-internal-tls"
+              defaultMode: 0440
+      - notExists:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.scheme
+      - notExists:
+          path: spec.template.spec.containers[1].readinessProbe.httpGet.scheme
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GENESIS_TLS_CERT
+            value: /etc/genesis/internal-tls/tls.crt
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GENESIS_TLS_CERT
+            value: /etc/genesis/internal-tls/tls.crt
+
+  - it: off, the staff-setup Job calls the app over http
+    template: templates/staff-setup-job.yaml
+    set:
+      keycloak:
+        setup:
+          url: "http://genesis-idp:8080/auth"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: UMAMI_URL
+            value: "http://genesis-genesis-umami:3000/umami"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CURL_CA_BUNDLE
+            value: /etc/genesis/internal-tls/ca.crt
+
+  # ---------------------------------------------------------------------------
+  # On: TLS on BOTH umami ports (R8). Every port stays; nothing is removed.
+  # ---------------------------------------------------------------------------
+  - it: on, both Service ports are kept
+    template: templates/service.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+    asserts:
+      - equal:
+          path: spec.ports[0].name
+          value: http
+      - equal:
+          path: spec.ports[0].port
+          value: 3000
+      - equal:
+          path: spec.ports[1].name
+          value: bridge
+      - equal:
+          path: spec.ports[1].port
+          value: 3001
+
+  - it: on, the app and the bridge mount the Secret read-only and read GENESIS_TLS_*
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: internal-tls
+            secret:
+              secretName: "genesis-internal-tls"
+              defaultMode: 0440
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: internal-tls
+            mountPath: /etc/genesis/internal-tls
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: internal-tls
+            mountPath: /etc/genesis/internal-tls
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GENESIS_TLS_CERT
+            value: /etc/genesis/internal-tls/tls.crt
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GENESIS_TLS_KEY
+            value: /etc/genesis/internal-tls/tls.key
+
+  - it: on, probes on both containers use HTTPS
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.scheme
+          value: HTTPS
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.scheme
+          value: HTTPS
+      - equal:
+          path: spec.template.spec.containers[1].readinessProbe.httpGet.scheme
+          value: HTTPS
+      - equal:
+          path: spec.template.spec.containers[1].livenessProbe.httpGet.scheme
+          value: HTTPS
+
+  - it: on, the bridge dials the app as https://localhost (a name on the certificate), not 127.0.0.1
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: UMAMI_INTERNAL_URL
+            value: "https://localhost:3000"
+
+  - it: on with a Redis CA, the bridge trusts a merged bundle written by an init container that fails closed
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: NODE_EXTRA_CA_CERTS
+            value: /etc/genesis/ca-bundle/bundle.pem
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: ca-bundle
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '\[ -s "\$f" \] \|\| \{ echo "missing or empty \$f" >&2; exit 1; \}'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'cat /etc/genesis/internal-tls/ca.crt; echo; cat /etc/redis-ca/ca.crt'
+      - equal:
+          path: spec.template.spec.initContainers[0].command[1]
+          value: -ec
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ca-bundle
+            emptyDir:
+              sizeLimit: 1Mi
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: ca-bundle
+            mountPath: /etc/genesis/ca-bundle
+            readOnly: true
+      # The app keeps the Redis CA alone: it calls no internal TLS server.
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NODE_EXTRA_CA_CERTS
+            value: /etc/redis-ca/ca.crt
+
+  - it: on without a Redis CA, the bridge trusts ca.crt directly and there is no init container
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      redis:
+        enabled: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: NODE_EXTRA_CA_CERTS
+            value: /etc/genesis/internal-tls/ca.crt
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: on, the staff-setup Job reaches the app over https and trusts the platform internal CA in curl and node
+    template: templates/staff-setup-job.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: UMAMI_URL
+            value: "https://genesis-genesis-umami:3000/umami"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CURL_CA_BUNDLE
+            value: /etc/genesis/internal-tls/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NODE_EXTRA_CA_CERTS
+            value: /etc/genesis/internal-tls/ca.crt
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: CURL_CA_BUNDLE
+            value: /etc/genesis/internal-tls/ca.crt
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: internal-tls
+            secret:
+              secretName: "genesis-internal-tls"
+              defaultMode: 0440
+
+  - it: a custom Secret name is honoured
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+          secretName: my-tls
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: internal-tls
+            secret:
+              secretName: "my-tls"
+              defaultMode: 0440
+
+  # ---------------------------------------------------------------------------
+  # Fail closed at render: a stale plain-http in-cluster URL would pass every
+  # probe and send plaintext.
+  # ---------------------------------------------------------------------------
+  - it: on with a plain-http authz URL fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: bridge.routeRegistration.url is plain http
+
+  - it: on with a plain-http Keycloak setup URL fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      keycloak:
+        setup:
+          url: "http://genesis-idp:8080/auth"
+    asserts:
+      - failedTemplate:
+          errorPattern: keycloak.setup.url is plain http
+
+  # ---------------------------------------------------------------------------
+  # A2 (DONE.md): internal TLS changes only traffic to in-cluster hosts. A host
+  # outside the cluster (a customer-hosted Keycloak or authz) behaves exactly as
+  # with the switch off: no refusal to render, no CA forced, URL untouched.
+  # In-cluster = a bare Service name, *.svc, *.svc.cluster.local, localhost,
+  # 127.0.0.1.
+  # ---------------------------------------------------------------------------
+  - it: on, an external plain-http authz and Keycloak URL still render, and are passed through untouched
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://authz.platform.example.com"
+      keycloak:
+        setup:
+          url: "http://idp.example.com/auth"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: AUTHZ_INTERNAL_URL
+            value: "http://authz.platform.example.com"
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: KC_URL
+            value: "http://idp.example.com/auth"
+        template: templates/staff-setup-job.yaml
+
+  - it: on, an external https Keycloak keeps curl's own trust store (no CURL_CA_BUNDLE replacing it)
+    template: templates/staff-setup-job.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      keycloak:
+        setup:
+          url: "https://login.example.com/auth"
+    asserts:
+      - notContains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: CURL_CA_BUNDLE
+            value: /etc/genesis/internal-tls/ca.crt
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: KC_URL
+            value: "https://login.example.com/auth"
+
+  - it: on, an in-cluster Keycloak URL gets the platform internal CA for curl
+    template: templates/staff-setup-job.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      keycloak:
+        setup:
+          url: "https://genesis-idp.genesis-develop.svc:8443/auth"
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: CURL_CA_BUNDLE
+            value: /etc/genesis/internal-tls/ca.crt
+
+  - it: on, plain http to a bare Service name fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: on, plain http to genesis-authz.ns.svc fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz.genesis-develop.svc:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: on, plain http to a .svc.cluster.local name fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz.genesis-develop.svc.cluster.local:8000/x"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: on, plain http to localhost fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://localhost:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: on, plain http to 127.0.0.1 fails the render
+    template: templates/deployment.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+      bridge:
+        routeRegistration:
+          url: "http://127.0.0.1:8000"
+    asserts:
+      - failedTemplate:
+          errorPattern: plain http to an in-cluster host
+
+  - it: off, plain-http in-cluster URLs render exactly as before (the guard only runs with the switch on)
+    template: templates/deployment.yaml
+    set:
+      bridge:
+        routeRegistration:
+          url: "http://genesis-authz:8000"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: AUTHZ_INTERNAL_URL
+            value: "http://genesis-authz:8000"
+
+  # R11: the leaf-rotation roll is opted in per workload, on the workload's own metadata.
+  - it: switch off, the Deployment carries no reload label
+    template: templates/deployment.yaml
+    asserts:
+      - notExists: {path: 'metadata.labels["genesis.autonomize.ai/internal-tls-reload"]'}
+
+  - it: switch on, the Deployment is opted in to the leaf roll and its pod template is not
+    template: templates/deployment.yaml
+    set:
+      global.internalTls.enabled: true
+    asserts:
+      - equal: {path: 'metadata.labels["genesis.autonomize.ai/internal-tls-reload"]', value: "true"}
+      - notExists: {path: 'spec.template.metadata.labels["genesis.autonomize.ai/internal-tls-reload"]'}
