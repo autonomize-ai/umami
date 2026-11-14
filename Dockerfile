@@ -1,14 +1,15 @@
-ARG NODE_IMAGE_VERSION="22-alpine"
+# genesis-base-images flavor: nightly OS upgrade, floors and Wiz. The runner needs a shell (start-docker.sh)
+# and pnpm at build time, so all three stages use the -dev flavor rather than node-22-slim.
+ARG NODE_IMAGE="sprintregistry.azurecr.io/genesis-base/node-22-dev:20261114-r1"
 ARG PNPM_VERSION="11.21.0"
 # Keep in sync with the prisma/@prisma/* versions in package.json
 ARG PRISMA_VERSION="7.9.1"
 
 # Install dependencies only when needed
-FROM node:${NODE_IMAGE_VERSION} AS deps
+FROM ${NODE_IMAGE} AS deps
 ARG PNPM_VERSION
 
-# Check https://github.com/nodejs/docker-node/tree/b4117f9333da4138b03a546ec926ef50a31506c3#nodealpine to understand why libc6-compat might be needed.
-RUN apk add --no-cache libc6-compat
+USER root
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 RUN npm install -g pnpm@${PNPM_VERSION}
@@ -18,7 +19,8 @@ RUN printf 'strictDepBuilds: false\n' > pnpm-workspace.yaml
 RUN pnpm install --frozen-lockfile
 
 # Rebuild the source code only when needed
-FROM node:${NODE_IMAGE_VERSION} AS builder
+FROM ${NODE_IMAGE} AS builder
+USER root
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -33,7 +35,8 @@ ENV DATABASE_URL="postgresql://user:pass@localhost:5432/dummy"
 RUN npm run build-docker
 
 # Production image, copy all the files and run next
-FROM node:${NODE_IMAGE_VERSION} AS runner
+FROM ${NODE_IMAGE} AS runner
+USER root
 WORKDIR /app
 
 ARG NODE_OPTIONS
@@ -44,15 +47,14 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_OPTIONS=$NODE_OPTIONS
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+RUN addgroup -S -g 1001 nodejs
+RUN adduser -S -u 1001 -G nodejs nextjs
 # Bootstrap pnpm with the bundled npm, then remove npm in the same layer so the
 # vulnerable packages vendored inside the npm CLI are not shipped in the final
 # image. pnpm is the only package manager needed at build and runtime.
 RUN set -x \
-    && apk add --no-cache curl libc6-compat 'zlib>=1.4-r0' \
     && npm install -g pnpm@${PNPM_VERSION} \
-    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+    && rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx
 
 RUN echo {} > package.json
 
@@ -89,4 +91,6 @@ EXPOSE 3000
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 
+# The Chainguard node image sets ENTRYPOINT /usr/bin/node, which would receive this CMD as arguments.
+ENTRYPOINT []
 CMD ["sh", "scripts/start-docker.sh"]
