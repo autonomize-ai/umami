@@ -1,6 +1,7 @@
 # genesis-base-images flavor: nightly OS upgrade, floors and Wiz. The runner needs a shell (start-docker.sh)
 # and pnpm at build time, so all three stages use the -dev flavor rather than node-22-slim.
-ARG NODE_IMAGE="sprintregistry.azurecr.io/genesis-base/node-22-dev:20261114-r1"
+# genesis-base-bump: node-22-dev 20261114-r1
+ARG NODE_IMAGE="sprintregistry.azurecr.io/genesis-base/node-22-dev@sha256:06e3b4880d2d6ecf2d0fd97a3138238ad95a7f5443ff1152dea5ed6b550495e9"
 ARG PNPM_VERSION="11.21.0"
 # Keep in sync with the prisma/@prisma/* versions in package.json
 ARG PRISMA_VERSION="7.9.1"
