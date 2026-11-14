@@ -423,6 +423,17 @@ Off unless global.internalTls.enabled; off renders exactly what it did before.
 {{- if dig "internalTls" "enabled" false (.Values.global | default dict) -}}true{{- end -}}
 {{- end -}}
 
+{{/*
+Internal TLS rotation (R11): opts the Deployment in to the provisioner's roll when the leaf rotates.
+The same label and rule as genesis-lib.internalTls.workloadLabels (this chart does not depend on
+genesis-lib): present only with the switch on, on the workload's own metadata.
+*/}}
+{{- define "umami.internalTls.workloadLabels" -}}
+{{- if include "umami.internalTls.enabled" . }}
+genesis.autonomize.ai/internal-tls-reload: "true"
+{{- end }}
+{{- end -}}
+
 {{/* "HTTPS" when internal TLS is on, else "HTTP". */}}
 {{- define "umami.internalTls.probeScheme" -}}
 {{- if include "umami.internalTls.enabled" . -}}HTTPS{{- else -}}HTTP{{- end -}}

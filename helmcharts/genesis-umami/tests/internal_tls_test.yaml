@@ -472,3 +472,17 @@ tests:
           content:
             name: AUTHZ_INTERNAL_URL
             value: "http://genesis-authz:8000"
+
+  # R11: the leaf-rotation roll is opted in per workload, on the workload's own metadata.
+  - it: switch off, the Deployment carries no reload label
+    template: templates/deployment.yaml
+    asserts:
+      - notExists: {path: 'metadata.labels["genesis.autonomize.ai/internal-tls-reload"]'}
+
+  - it: switch on, the Deployment is opted in to the leaf roll and its pod template is not
+    template: templates/deployment.yaml
+    set:
+      global.internalTls.enabled: true
+    asserts:
+      - equal: {path: 'metadata.labels["genesis.autonomize.ai/internal-tls-reload"]', value: "true"}
+      - notExists: {path: 'spec.template.metadata.labels["genesis.autonomize.ai/internal-tls-reload"]'}
