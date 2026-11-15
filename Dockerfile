@@ -1,7 +1,9 @@
-# Node 22.23.5 (fixes CVE-2026-123864, -123865, -123866, -123872 in 22.23.4), pinned by tag
-# and digest so a rebuild cannot float; this digest is what node:22-alpine resolved to on
-# 2026-11-12. Bump tag and digest together.
-ARG NODE_IMAGE_VERSION="22.23.5-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a"
+# genesis-base-images flavor: node-22-dev, rebuilt nightly with the OS upgrade, package floors and Wiz
+# (this replaces the node 22.23.5-alpine pin and the in-file openssl/zlib/curl upgrades). The runner
+# needs a shell (scripts/start-docker.sh) and pnpm, so all stages use -dev rather than node-22-slim.
+# Digest and tag are rewritten together by the genesis-base bump.
+# genesis-base-bump: node-22-dev 20261114-r1
+ARG NODE_IMAGE="sprintregistry.azurecr.io/genesis-base/node-22-dev@sha256:06e3b4880d2d6ecf2d0fd97a3138238ad95a7f5443ff1152dea5ed6b550495e9"
 # 11.28.8 bundles undici 6.29.1 in dist/node_modules; 11.28.2 bundled 6.28.1
 # (CVE-2026-109869 / GHSA-xjj6-f33q-929c, high), which image scanning reports
 # against /usr/local/lib/node_modules/pnpm in the runner stage.
@@ -23,11 +25,10 @@ ARG MYSQL2_VERSION="^3.23.1"
 ARG MSAL_NODE_VERSION=">=7.1.0 <8"
 
 # Install dependencies only when needed
-FROM node:${NODE_IMAGE_VERSION} AS deps
+FROM ${NODE_IMAGE} AS deps
 ARG PNPM_VERSION
 
-# Check https://github.com/nodejs/docker-node/tree/b4117f9333da4138b03a546ec926ef50a31506c3#nodealpine to understand why libc6-compat might be needed.
-RUN apk add --no-cache libc6-compat
+USER root
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN npm install -g pnpm@${PNPM_VERSION}
@@ -42,7 +43,8 @@ RUN printf 'strictDepBuilds: false\n' >> pnpm-workspace.yaml
 RUN pnpm install --frozen-lockfile
 
 # Rebuild the source code only when needed
-FROM node:${NODE_IMAGE_VERSION} AS builder
+FROM ${NODE_IMAGE} AS builder
+USER root
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -57,7 +59,8 @@ ENV DATABASE_URL="postgresql://user:pass@localhost:5432/dummy"
 RUN npm run build-docker
 
 # Production image, copy all the files and run next
-FROM node:${NODE_IMAGE_VERSION} AS runner
+FROM ${NODE_IMAGE} AS runner
+USER root
 WORKDIR /app
 
 ARG NODE_OPTIONS
@@ -73,33 +76,15 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_OPTIONS=$NODE_OPTIONS
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-# Upgrade the OpenSSL runtime ahead of the base image. node:22-alpine (Alpine
-# 3.24.1) still ships libssl3/libcrypto3 3.5.7-r0, while Alpine v3.24/main
-# already carries the patched 3.5.8-r0 - so the fix is reachable without moving
-# off the tag, and arrives on its own once the base image is rebuilt. Image
-# scanning blocks on seven HIGH CVEs against 3.5.7-r0: CVE-2026-14456,
-# CVE-2026-14457, CVE-2026-18798, CVE-2026-54874, CVE-2026-63072,
-# CVE-2026-63075 and CVE-2026-63076. This is the only stage that ships, so it is
-# the only stage that needs the upgrade, and it has to precede the curl install
-# so libcurl resolves against the patched libssl3. zlib is upgraded the same
-# way: the base ships 1.3.2-r0 (CVE-2026-85091, HIGH), and 1.3.2-r1 still has
-# CVE-2026-4738 (CRITICAL), so zlib carries a floor of 1.4-r0 (v3.24/main has it;
-# 3.3.0-mi.42 shipped 1.3.2-r1 and failed image-scanner-wiz run 127972).
-# curl carries a floor for the same reason: 8.22.0-r0 has CVE-2026-92392 (HIGH,
-# public exploit) and v3.24/main has 8.23.0-r0. The floor makes the build fail
-# instead of silently shipping the old curl if the mirror lags.
-#
-# Then bootstrap pnpm with the bundled npm and remove npm in the same layer, so
-# the vulnerable packages vendored inside the npm CLI are not shipped in the
-# final image. pnpm is the only package manager needed at build and runtime.
+RUN addgroup -S -g 1001 nodejs
+RUN adduser -S -u 1001 -G nodejs nextjs
+# Bootstrap pnpm with the bundled npm, then remove npm in the same layer so the vulnerable
+# packages vendored inside the npm CLI are not shipped in the final image. OS package CVEs
+# (openssl, zlib, curl) are handled by the nightly genesis-base rebuild; curl and libc6-compat are
+# not needed (glibc base, nothing here calls curl).
 RUN set -x \
-    && apk upgrade --no-cache libssl3 libcrypto3 zlib \
-    && apk add --no-cache 'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' 'zlib>=1.4-r0' libc6-compat \
     && npm install -g pnpm@${PNPM_VERSION} \
-    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
-
+    && rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx
 RUN echo {} > package.json
 
 # The overrides have to be repeated here. This stage resolves its own dependency
@@ -152,4 +137,6 @@ EXPOSE 3000
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 
+# The Chainguard node image sets ENTRYPOINT /usr/bin/node, which would receive this CMD as arguments.
+ENTRYPOINT []
 CMD ["sh", "scripts/start-docker.sh"]
