@@ -454,6 +454,17 @@ genesis.autonomize.ai/internal-tls-reload: "true"
   readOnly: true
 {{- end -}}
 
+{{/* Client-only pods (the staff-setup Job) verify peers and serve nothing: ca.crt alone, never tls.key, same name. */}}
+{{- define "umami.internalTls.caVolume" -}}
+- name: internal-tls
+  secret:
+    secretName: {{ include "umami.internalTls.secretName" . | quote }}
+    defaultMode: 0444
+    items:
+      - key: ca.crt
+        path: ca.crt
+{{- end -}}
+
 {{/* The pod volume. 0440: the pod's fsGroup (podSecurityContext) makes it readable. */}}
 {{- define "umami.internalTls.volume" -}}
 - name: internal-tls

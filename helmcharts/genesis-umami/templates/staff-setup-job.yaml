@@ -193,7 +193,7 @@ spec:
             defaultMode: 0555
         {{- end }}
         {{- if include "umami.internalTls.enabled" . }}
-        {{- include "umami.internalTls.volume" . | nindent 8 }}
+        {{- include "umami.internalTls.caVolume" . | nindent 8 }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

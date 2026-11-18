@@ -274,7 +274,9 @@ tests:
             name: internal-tls
             secret:
               secretName: "genesis-internal-tls"
-              defaultMode: 0440
+              defaultMode: 0444
+              items:
+                - {key: ca.crt, path: ca.crt}
 
   - it: a custom Secret name is honoured
     template: templates/deployment.yaml
@@ -610,3 +612,25 @@ tests:
           path: 'spec.template.spec.containers[?(@.name == "bridge")].env'
           content: {name: AUTHZ_INTERNAL_URL, value: "https://genesis-authz:8000/x@localhost"}
           any: true
+
+  - it: on projects ca.crt only into the staff-setup Job, never tls.key
+    template: templates/staff-setup-job.yaml
+    set:
+      global:
+        internalTls:
+          enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: internal-tls
+            secret:
+              secretName: genesis-internal-tls
+              defaultMode: 0444
+              items:
+                - {key: ca.crt, path: ca.crt}
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: internal-tls
+            secret: {secretName: genesis-internal-tls, defaultMode: 0440}
