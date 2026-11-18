@@ -6,7 +6,21 @@ metadata:
   labels:
     {{- include "umami.labels" . | nindent 4 }}
     app.kubernetes.io/component: umami
-  {{- with .Values.ingress.annotations }}
+  {{- $ann := deepCopy (.Values.ingress.annotations | default dict) }}
+  {{- /* Under internal TLS the Service port serves TLS only. An operator's own annotation ending in /backend-protocol
+         wins; else an ingress-nginx class gets its HTTPS annotation and any other or unnamed class fails the render. */}}
+  {{- if include "umami.internalTls.enabled" . }}
+  {{- $set := false }}
+  {{- range $k, $_ := $ann }}{{- if hasSuffix "/backend-protocol" $k }}{{- $set = true }}{{- end }}{{- end }}
+  {{- if not $set }}
+  {{- if contains "nginx" (.Values.ingress.className | default "" | toString) }}
+  {{- $_ := set $ann "nginx.ingress.kubernetes.io/backend-protocol" "HTTPS" }}
+  {{- else }}
+  {{- fail (printf "genesis-umami: with global.internalTls.enabled the Service port serves TLS only, and ingress.className %q is not an ingress-nginx class: set ingress.className to your nginx class, or set your controller's HTTPS-backend annotation (a key ending in /backend-protocol) in ingress.annotations" (.Values.ingress.className | default "" | toString)) }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- with $ann }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

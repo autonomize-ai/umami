@@ -411,3 +411,99 @@ read. Renders nothing when no list applies.
 {{- end -}}
 {{- with $tolerations }}{{ toYaml . }}{{ end -}}
 {{- end -}}
+
+{{/* Internal TLS without a genesis-lib dependency: the same global.internalTls keys, Secret (tls.crt, tls.key, ca.crt)
+     and mount path as genesis-lib's internalTls helpers. Off unless global.internalTls.enabled; off renders as before. */}}
+{{- define "umami.internalTls.enabled" -}}
+{{- if eq (toString (dig "internalTls" "enabled" false (.Values.global | default dict))) "true" -}}true{{- end -}}
+{{- end -}}
+
+{{/* Opts the Deployment in to the provisioner's roll when the leaf rotates: the same label and rule as
+     genesis-lib.internalTls.workloadLabels, only with the switch on, on the workload's own metadata. */}}
+{{- define "umami.internalTls.workloadLabels" -}}
+{{- if include "umami.internalTls.enabled" . }}
+genesis.autonomize.ai/internal-tls-reload: "true"
+{{- end }}
+{{- end -}}
+
+{{- define "umami.internalTls.secretName" -}}
+{{- dig "internalTls" "secretName" "" (.Values.global | default dict) | default "genesis-internal-tls" -}}
+{{- end -}}
+
+{{/* Where the Secret is mounted: global.internalTls.mountPath, the same key and default as genesis-lib. */}}
+{{- define "umami.internalTls.mountPath" -}}
+{{- trimSuffix "/" (dig "internalTls" "mountPath" "" (.Values.global | default dict) | default "/etc/genesis/internal-tls") -}}
+{{- end -}}
+
+{{- define "umami.internalTls.caPath" -}}{{ include "umami.internalTls.mountPath" . }}/ca.crt{{- end -}}
+
+{{/* GENESIS_TLS_* env entries (list items, no indentation). */}}
+{{- define "umami.internalTls.env" -}}
+{{- $dir := include "umami.internalTls.mountPath" . }}
+- name: GENESIS_TLS_CERT
+  value: {{ printf "%s/tls.crt" $dir | quote }}
+- name: GENESIS_TLS_KEY
+  value: {{ printf "%s/tls.key" $dir | quote }}
+- name: GENESIS_TLS_CA
+  value: {{ printf "%s/ca.crt" $dir | quote }}
+{{- end -}}
+
+{{- define "umami.internalTls.volumeMount" -}}
+- name: internal-tls
+  mountPath: {{ include "umami.internalTls.mountPath" . }}
+  readOnly: true
+{{- end -}}
+
+{{/* Client-only pods (the staff-setup Job) verify peers and serve nothing: ca.crt alone, never tls.key, same name. */}}
+{{- define "umami.internalTls.caVolume" -}}
+- name: internal-tls
+  secret:
+    secretName: {{ include "umami.internalTls.secretName" . | quote }}
+    defaultMode: 0444
+    items:
+      - key: ca.crt
+        path: ca.crt
+{{- end -}}
+
+{{/* The pod volume. 0440: the pod's fsGroup (podSecurityContext) makes it readable. */}}
+{{- define "umami.internalTls.volume" -}}
+- name: internal-tls
+  secret:
+    secretName: {{ include "umami.internalTls.secretName" . | quote }}
+    defaultMode: 0440
+{{- end -}}
+
+{{/* NODE_EXTRA_CA_CERTS takes one file and the app already uses it for the Redis CA. With both, the bridge gets a
+     merged file (platform CA + Redis CA) written by an init container at pod start; otherwise it points at ca.crt. */}}
+{{- define "umami.internalTls.mergeCA" -}}
+{{- if and (include "umami.internalTls.enabled" .) .Values.redis.enabled .Values.redis.tls .Values.redis.caCert.secretName -}}true{{- end -}}
+{{- end -}}
+
+{{- define "umami.internalTls.caFile" -}}
+{{- if include "umami.internalTls.mergeCA" . -}}/etc/genesis/ca-bundle/bundle.pem{{- else -}}{{ include "umami.internalTls.caPath" . }}{{- end -}}
+{{- end -}}
+
+{{/* True when a URL's host is in-cluster: a bare Service name, *.svc, *.svc.cluster.local, localhost or 127.0.0.1.
+     Internal TLS changes only traffic to such hosts; any other host (a customer-hosted Keycloak, say) is left as is. */}}
+{{- define "umami.internalTls.isInternalUrl" -}}
+{{- $h := regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" (. | toString | lower) "" -}}
+{{- $h = regexReplaceAll "[/?#].*$" $h "" -}}
+{{- $h = regexReplaceAll "^[^@]*@" $h "" -}}
+{{- if not (hasPrefix "[" $h) -}}
+{{- $h = regexReplaceAll ":[0-9]+$" $h "" -}}
+{{- if or (not (contains "." $h)) (hasSuffix ".svc" $h) (hasSuffix ".svc.cluster.local" $h) (eq $h "localhost") (eq $h "127.0.0.1") -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* An in-cluster http:// URL becomes https:// when internal TLS is on, like genesis-lib.internalTls.url (loopback
+     excepted), so turning the switch on needs no other values change. Any other URL renders as written. */}}
+{{- define "umami.internalTls.url" -}}
+{{- $u := .url | default "" | toString -}}
+{{- $host := regexReplaceAll ":[0-9]+$" (regexReplaceAll "^[^@]*@" (regexReplaceAll "[/?#].*$" (regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" ($u | lower) "") "") "") "" -}}
+{{- $loop := has $host (list "localhost" "127.0.0.1") -}}
+{{- if and (include "umami.internalTls.enabled" .ctx) (hasPrefix "http://" ($u | lower)) (include "umami.internalTls.isInternalUrl" $u) (not $loop) -}}
+https://{{ substr 7 (len $u) $u }}
+{{- else -}}
+{{ $u }}
+{{- end -}}
+{{- end -}}

@@ -28,9 +28,8 @@
  * no second image to the build pipeline.
  */
 
-import http from 'node:http';
-
 import { queryDatabaseConfig, withReadOnly } from './db.mjs';
+import { createListener, proxyRequest, tlsEnabled } from './tls.mjs';
 import {
   DATA_TYPE_NAMES,
   QueryError,
@@ -1312,14 +1311,10 @@ function deny(res, status, message) {
 }
 
 function proxy(req, res) {
-  const upstream = http.request(
-    UMAMI + req.url,
-    { method: req.method, headers: req.headers },
-    up => {
-      res.writeHead(up.statusCode || 502, up.headers);
-      up.pipe(res);
-    },
-  );
+  const upstream = proxyRequest(UMAMI, req, up => {
+    res.writeHead(up.statusCode || 502, up.headers);
+    up.pipe(res);
+  });
 
   upstream.on('error', err => {
     log('upstream error:', err.message);
@@ -1923,7 +1918,7 @@ async function mintTenantBrowserToken(req) {
   return { token: body.token, landing: `/teams/${teamId}/websites` };
 }
 
-const server = http.createServer(async (req, res) => {
+const server = createListener(async (req, res) => {
   // Liveness for the sidecar itself. Deliberately before every other check so
   // kubelet never needs a role header.
   if (req.url === '/bridge-healthz') {
@@ -2046,7 +2041,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  log(`listening on ${PORT}, proxying ${UMAMI}, base path "${BASE_PATH || '/'}"`);
+  log(`listening on ${PORT}${tlsEnabled() ? ' over TLS' : ''}, proxying ${UMAMI}, base path "${BASE_PATH || '/'}"`);
   // After listen, so a slow or unreachable authz cannot delay readiness.
   registerRoutes();
   log(

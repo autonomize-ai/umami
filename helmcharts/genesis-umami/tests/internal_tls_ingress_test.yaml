@@ -1,0 +1,83 @@
+suite: genesis-umami Ingress under internal TLS
+release:
+  name: genesis
+  namespace: genesis
+templates:
+  - templates/ingress.yaml
+set:
+  enabled: true
+  ingress:
+    enabled: true
+    host: umami.example
+  database:
+    existingSecret: dbsec
+  app:
+    existingSecret: appsec
+tests:
+  - it: off renders no annotations unless the operator sets some
+    asserts:
+      - notExists:
+          path: metadata.annotations
+
+  - it: off keeps an operator's annotations exactly as written
+    set:
+      ingress.annotations: {a.example/x: "1"}
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value: {a.example/x: "1"}
+
+  - it: on tells ingress-nginx to talk HTTPS to the TLS-only Service port
+    set:
+      global.internalTls.enabled: true
+      ingress.className: nginx
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value: {nginx.ingress.kubernetes.io/backend-protocol: HTTPS}
+
+  - it: on keeps the operator's own backend-protocol and their other annotations, once
+    set:
+      global.internalTls.enabled: true
+      ingress.annotations:
+        nginx.ingress.kubernetes.io/backend-protocol: GRPCS
+        a.example/x: "1"
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value: {nginx.ingress.kubernetes.io/backend-protocol: GRPCS, a.example/x: "1"}
+
+  - it: on with an nginx class gets the HTTPS annotation
+    set:
+      global.internalTls.enabled: true
+      ingress.className: nginx-internal
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value: {nginx.ingress.kubernetes.io/backend-protocol: HTTPS}
+
+  - it: on with another controller class and no backend-protocol annotation fails the render
+    set:
+      global.internalTls.enabled: true
+      ingress.className: azure-application-gateway
+    asserts:
+      - failedTemplate:
+          errorPattern: is not an ingress-nginx class
+
+  - it: on with another controller class keeps that controller's own backend-protocol annotation
+    set:
+      global.internalTls.enabled: true
+      ingress.className: alb
+      ingress.annotations:
+        alb.ingress.kubernetes.io/backend-protocol: HTTPS
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value: {alb.ingress.kubernetes.io/backend-protocol: HTTPS}
+
+  - it: on with no className (the cluster's default controller, maybe not nginx) fails the render
+    set:
+      global.internalTls.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: is not an ingress-nginx class
