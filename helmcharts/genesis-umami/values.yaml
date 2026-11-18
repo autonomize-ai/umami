@@ -6,7 +6,9 @@
 # plus, by default, an in-chart PostgreSQL — or bring your own DB.
 # =============================================================================
 
-# Mirror of the umbrella condition so the subchart can also be used standalone.
+# Mirror of the umbrella condition so the subchart can also be used standalone. Internal TLS reads global.internalTls
+# (genesis-lib's keys: enabled, secretName, mountPath); on, the app (3000) and the bridge (3001) serve TLS 1.2+, probes
+# use HTTPS, and the in-cluster http:// URLs this chart calls become https://.
 enabled: false
 
 replicaCount: 1
