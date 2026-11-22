@@ -2,8 +2,8 @@
 # (this replaces the node 22.23.5-alpine pin and the in-file openssl/zlib/curl upgrades). The runner
 # needs a shell (scripts/start-docker.sh) and pnpm, so all stages use -dev rather than node-22-slim.
 # Digest and tag are rewritten together by the genesis-base bump.
-# genesis-base-bump: node-22-dev 20261121-r1
-ARG NODE_IMAGE=sprintregistry.azurecr.io/genesis-base/node-22-dev@sha256:6fc0edb599a7cff92c817937d5401b4bfac29dd4282115d7c398363392751307
+# genesis-base-bump: node-22-dev 20261122-r1
+ARG NODE_IMAGE=sprintregistry.azurecr.io/genesis-base/node-22-dev@sha256:c1068d0d473d821421c65ad865a9ef3b4654111e325c639d00a5637cd319e959
 # 11.28.8 bundles undici 6.29.1 in dist/node_modules; 11.28.2 bundled 6.28.1
 # (CVE-2026-109869 / GHSA-xjj6-f33q-929c, high), which image scanning reports
 # against /usr/local/lib/node_modules/pnpm in the runner stage.
