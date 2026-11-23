@@ -7,6 +7,11 @@ packages:
 # against. The pin is still exact in @prisma/config 7.10.0, so no prisma upgrade
 # reaches a patched release and an override is the only route to one.
 #
+# effect 3.20.0 carries CVE-2026-121707 (high), fixed in 3.22.1. It reaches us
+# the same way: @prisma/config pins it exactly to 3.20.0, still exact in 7.10.1,
+# so the override holds it on the patched 3.x line. The Dockerfile runner stage
+# repeats this override.
+#
 # mysql2 3.15.3 carries GHSA-3f6p-5ww8-9rcr (high, auth plugin downgrade leaks
 # plaintext credentials, fixed in 3.22.0) and GHSA-rgwj-5xj2-c3m3 (moderate,
 # unbounded zlib inflate in the compressed protocol handler, fixed in 3.23.1).
@@ -49,6 +54,7 @@ packages:
 overrides:
   '@azure/msal-node': '>=7.1.0 <8'
   deepmerge-ts: '^8.0.2'
+  effect: '>=3.22.1 <4'
   mysql2: '^3.23.1'
   sharp: '^0.35.5'
   caniuse-lite: '1.0.30001806'
